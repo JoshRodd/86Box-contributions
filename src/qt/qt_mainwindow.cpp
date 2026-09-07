@@ -200,6 +200,19 @@ processEventsOnlyWhenPausedOrModal()
 }
 #endif
 
+QString
+MainWindow::windowTitleForVm()
+{
+    if (window_title[0])
+        return QString::fromUtf8(window_title);
+
+    QString vmname(vm_name);
+    if (!vmname.isEmpty() && (vmname.endsWith('"') || vmname.endsWith('\'')))
+        vmname.chop(1);
+
+    return QString("%1 - 86Box-instrumented %2").arg(vmname, EMU_VERSION_FULL);
+}
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
@@ -328,10 +341,7 @@ MainWindow::MainWindow(QWidget *parent)
     this->setWindowFlag(Qt::WindowMaximizeButtonHint, vid_resize == 1);
     this->setWindowFlag(Qt::WindowFullscreenButtonHint, vid_resize == 1);
 
-    QString vmname(vm_name);
-    if (vmname.at(vmname.size() - 1) == '"' || vmname.at(vmname.size() - 1) == '\'')
-        vmname.truncate(vmname.size() - 1);
-    this->setWindowTitle(QString("%1 - %2 %3").arg(vmname, EMU_NAME, EMU_VERSION_FULL));
+    this->setWindowTitle(windowTitleForVm());
 
     connect(this, &MainWindow::forceInterpretationCompleted, this, [this]() {
         const auto fi_icon      = cpu_force_interpreter ? QIcon(":/menuicons/qt/icons/recompiler.ico") :

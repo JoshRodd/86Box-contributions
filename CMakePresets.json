@@ -26,6 +26,27 @@
             "inherits": "base"
         },
         {
+            "name": "terminal",
+            "displayName": "Native terminal frontend",
+            "description": "Unix terminal-only release build without Qt or SDL",
+            "binaryDir": "${sourceDir}/work/build-terminal-only",
+            "cacheVariables": {
+                "TERMINAL": true,
+                "QT": false,
+                "CMAKE_MACOSX_BUNDLE": false,
+                "BUILD_TESTING": false,
+                "BUILD_BENCHMARKS": false,
+                "OPENAL": true,
+                "RTMIDI": false,
+                "FLUIDSYNTH": false,
+                "MUNT": false,
+                "SOUNDCANVAS": false,
+                "DISCORD": false,
+                "VNC": false
+            },
+            "inherits": "regular"
+        },
+        {
             "name": "optimized",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Optimized"
@@ -128,6 +149,12 @@
             "inherits": "regular"
         }
     ],
-    "buildPresets": [],
+    "buildPresets": [
+        {
+            "name": "terminal",
+            "configurePreset": "terminal",
+            "targets": ["86Box"]
+        }
+    ],
     "testPresets": []
 }

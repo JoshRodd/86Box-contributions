@@ -21,6 +21,7 @@
  *          Copyright 2021      Andreas J. Reichel.
  *          Copyright 2021-2025 Jasmine Iwanek.
  */
+#include <errno.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -31,7 +32,6 @@
 #include <wchar.h>
 #include <unistd.h>
 #include <math.h>
-
 #ifndef _WIN32
 #    include <pwd.h>
 #endif
@@ -123,8 +123,9 @@ int start_in_fullscreen = 0; /* (O) start in fullscreen */
 #ifdef _WIN32
 int force_debug = 0; /* (O) force debug output */
 #endif
-int settings_only     = 0; /* (O) show only the settings dialog */
-int confirm_exit_cmdl = 1; /* (O) do not ask for confirmation on quit if set to 0 */
+int settings_only       = 0; /* (O) show only the settings dialog */
+int confirm_exit_cmdl   = 1; /* (O) do not ask for confirmation on quit if set to 0 */
+int start_in_background = 0; /* (O) show the Qt window without activation */
 #ifdef _WIN32
 uint64_t unique_id   = 0;
 uint64_t source_hwnd = 0;
@@ -133,9 +134,10 @@ char       rom_path[1024]   = { '\0' };     /* (O) full path to ROMs */
 rom_path_t rom_paths        = { "", NULL }; /* (O) full paths to ROMs */
 char       asset_path[1024] = { '\0' };     /* (O) full path to assets */
 rom_path_t asset_paths      = { "", NULL }; /* (O) full paths to assets */
-char       log_path[1024]   = { '\0' };     /* (O) full path of logfile */
-char       vm_name[1024]    = { '\0' };     /* (O) display name of the VM */
-int      do_nothing                             = 0;
+char       log_path[1024]     = { '\0' }; /* (O) full path of logfile */
+char       vm_name[1024]      = { '\0' }; /* (O) display name of the VM */
+char       window_title[1024] = { '\0' }; /* (O) override title of the Qt VM window */
+int      do_nothing                              = 0;
 int      dump_missing                           = 0;
 int      clear_cmos                             = 0;
 #ifdef USE_INSTRUMENT
@@ -783,6 +785,8 @@ pc_show_usage(void)
 #ifndef USE_SDL_UI
             "-S or --settings\t\t\t- show only the settings dialog\n"
 #endif
+            "    --background\t\t\t- show the VM window without activating it\n"
+            "    --window-title title\t- override the VM window title\n"
 #ifdef SHOW_EXTRA_PARAMS
             "-T or --testmode\t\t- test mode: execute the test mode entry\n"
             "\t\t\t\t   point on init/hard reset\n"
@@ -981,6 +985,13 @@ usage:
                 goto usage;
 
             strcpy(vm_name, argv[++c]);
+        } else if (!strcasecmp(argv[c], "--window-title")) {
+            if ((c + 1) == argc)
+                goto usage;
+
+            snprintf(window_title, sizeof(window_title), "%s", argv[++c]);
+        } else if (!strcasecmp(argv[c], "--background")) {
+            start_in_background = 1;
 #ifndef USE_SDL_UI
         } else if (!strcasecmp(argv[c], "--settings") || !strcasecmp(argv[c], "-S")) {
             settings_only = 1;

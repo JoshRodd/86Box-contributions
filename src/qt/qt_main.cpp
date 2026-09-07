@@ -540,9 +540,48 @@ QTimer discordupdate;
 WindowsDarkModeFilter *vmm_dark_mode_filter = nullptr;
 #endif
 
+static bool
+consumeWindowOptions(int &argc, char *argv[])
+{
+    for (int i = 1; i < argc; ++i) {
+        const auto option = QString::fromLocal8Bit(argv[i]);
+        int        remove_count = 0;
+
+        if (option == QStringLiteral("--window-title")) {
+            if ((i + 1) == argc) {
+                fprintf(stderr, "--window-title requires text\n");
+                return false;
+            }
+
+            const auto title = QString::fromLocal8Bit(argv[i + 1]).toUtf8();
+            if (title.size() >= static_cast<int>(sizeof(window_title))) {
+                fprintf(stderr, "--window-title is too long\n");
+                return false;
+            }
+            memcpy(window_title, title.constData(), title.size() + 1);
+            remove_count = 2;
+        } else if (option == QStringLiteral("--background")) {
+            start_in_background = 1;
+            remove_count = 1;
+        } else {
+            continue;
+        }
+
+        for (int arg = i; (arg + remove_count) < argc; ++arg)
+            argv[arg] = argv[arg + remove_count];
+        argc -= remove_count;
+        argv[argc] = nullptr;
+        --i;
+    }
+
+    return true;
+}
+
 int
 main(int argc, char *argv[])
 {
+    if (!consumeWindowOptions(argc, argv))
+        return 2;
 #ifdef Q_OS_WINDOWS
     bool wasDarkTheme = false;
     /* Check if Windows supports UTF-8 */
@@ -779,6 +818,8 @@ main(int argc, char *argv[])
 #endif
 
     main_window = new MainWindow();
+    if (start_in_background)
+        main_window->setAttribute(Qt::WA_ShowWithoutActivating);
     if (startMaximized) {
         main_window->showMaximized();
     } else {

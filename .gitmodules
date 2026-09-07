@@ -1,0 +1,6 @@
+[submodule "submodules/terminal-to-pc-keyboard"]
+	path = submodules/terminal-to-pc-keyboard
+	url = git@github.com:sbooks-org/terminal-to-pc-keyboard.git
+[submodule "submodules/tigt"]
+	path = submodules/tigt
+	url = git@github.com:sbooks-org/tigt.git

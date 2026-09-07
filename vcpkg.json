@@ -15,13 +15,26 @@
     "dependencies": [
         "freetype",
         "libpng",
-        "sdl3",
-        "rtmidi",
         "libslirp",
-        "fluidsynth",
         "libsndfile"
     ],
     "features": {
+        "terminal-ui": {
+            "description": "Native POSIX terminal frontend",
+            "dependencies": ["ncurses"]
+        },
+        "sdl-ui": {
+            "description": "SDL support for graphical frontends",
+            "dependencies": ["sdl3"]
+        },
+        "rtmidi": {
+            "description": "RtMidi host MIDI support",
+            "dependencies": ["rtmidi"]
+        },
+        "fluidsynth": {
+            "description": "FluidSynth MIDI synthesis",
+            "dependencies": ["fluidsynth"]
+        },
         "qt-ui": {
             "description": "Qt User Interface",
             "dependencies": [

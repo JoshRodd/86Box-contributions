@@ -35,6 +35,7 @@ public:
 
     void         showMessage(int flags, const QString &header, const QString &message, bool richText);
     QString      getTitle();
+    static QString windowTitleForVm();
     void         blitToWidget(int x, int y, int w, int h, int monitor_index);
     QSize        getRenderWidgetSize();
     void         setSendKeyboardInput(bool enabled);

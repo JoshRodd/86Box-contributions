@@ -103,6 +103,7 @@ static volatile uint8_t num_lock     = 0;
 static volatile uint8_t scroll_lock  = 0;
 static volatile uint8_t kana_lock    = 0;
 static volatile uint8_t kbd_in_reset = 0;
+static uint8_t input_set1_prefix;
 static uint8_t shift                 = 0;
 
 static int key5576mode = 0;
@@ -153,6 +154,7 @@ keyboard_init(void)
     kana_lock    = 0;
     shift        = 0;
     kbd_in_reset = 0;
+    input_set1_prefix = 0;
 
     memset(recv_key, 0x00, sizeof(recv_key));
     memset(recv_key_ui, 0x00, sizeof(recv_key));
@@ -388,6 +390,22 @@ keyboard_input(int down, uint16_t scan)
     }
 }
 
+/* Translate raw Set 1 bytes from an external keyboard mapper into UI events. */
+void
+keyboard_input_set1(uint8_t byte)
+{
+    if (byte == 0xe0 || byte == 0xe1) {
+        input_set1_prefix = byte;
+        return;
+    }
+
+    const uint16_t scan = (uint16_t) (byte & 0x7f) | ((uint16_t) input_set1_prefix << 8);
+
+    input_set1_prefix = 0;
+    keyboard_input((byte & 0x80) == 0, scan);
+}
+
+
 void
 keyboard_all_up(void)
 {
@@ -405,6 +423,7 @@ keyboard_all_up(void)
     }
 
     shift = 0;
+    input_set1_prefix = 0;
 }
 
 void

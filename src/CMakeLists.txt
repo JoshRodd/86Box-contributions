@@ -164,15 +164,18 @@ if(APPLE)
     # Force using the newest library if it's installed by homebrew
     set(CMAKE_FIND_FRAMEWORK LAST)
 
-    # setting our compilation target to macOS 10.15 Catalina if targeting Qt6,
-    # macOS 10.14 Mojave for vulkan support, 10.13 High Sierra otherwise
-    if (USE_QT6)
-        set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15")
-    else()
-        if(MOLTENVK)
-            set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14")
+    # Terminal builds use the toolchain's deployment target, not a Qt baseline.
+    if(NOT TERMINAL)
+        # setting our compilation target to macOS 10.15 Catalina if targeting Qt6,
+        # macOS 10.14 Mojave for vulkan support, 10.13 High Sierra otherwise
+        if (USE_QT6)
+            set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15")
         else()
-            set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13")
+            if(MOLTENVK)
+                set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14")
+            else()
+                set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13")
+            endif()
         endif()
     endif()
 endif()
@@ -182,7 +185,7 @@ include_directories(${FREETYPE_INCLUDE_DIRS})
 if(FREETYPE_INCLUDE_DIR_ft2build)
     include_directories(${FREETYPE_INCLUDE_DIR_ft2build})
 endif()
-if(APPLE)
+if(APPLE AND CMAKE_MACOSX_BUNDLE)
     # Freetype is dynamically loaded by the emulator, however, we link it
     # on macOS so it gets copied to the bundle by the installation process
     target_link_libraries(86Box Freetype::Freetype)
@@ -225,7 +228,7 @@ if(WIN32 OR (APPLE AND CMAKE_MACOSX_BUNDLE))
     # Copy the binary to the root of the install prefix on Windows and macOS
     install(TARGETS 86Box DESTINATION ".")
 else()
-    # On Linux we want to copy the binary to the `bin` folder.
+    # Standalone Unix executables go in the `bin` folder.
     install(TARGETS 86Box)
 endif()
 
@@ -243,7 +246,7 @@ if(WIN32)
         get_filename_component(CMAKE_INSTALL_PREFIX_ABSOLUTE \${CMAKE_INSTALL_PREFIX} ABSOLUTE)
         fixup_bundle(\"\${CMAKE_INSTALL_PREFIX_ABSOLUTE}/$<TARGET_FILE_NAME:86Box>\" \"\" \"\")"
     COMPONENT Runtime)
-elseif(APPLE AND NOT QT)
+elseif(APPLE AND CMAKE_MACOSX_BUNDLE AND NOT QT)
     install(CODE "
         include(BundleUtilities)
         get_filename_component(CMAKE_INSTALL_PREFIX_ABSOLUTE \${CMAKE_INSTALL_PREFIX} ABSOLUTE)
@@ -269,6 +272,10 @@ elseif(WIN32)
 endif()
 
 
+if(TERMINAL)
+    add_compile_definitions(USE_TERMINAL_UI)
+endif()
+
 add_subdirectory(device)
 add_subdirectory(disk)
 add_subdirectory(floppy)
@@ -283,14 +290,18 @@ add_subdirectory(sound)
 add_subdirectory(utils)
 add_subdirectory(video)
 
-if (APPLE)
+if(APPLE AND NOT TERMINAL)
     add_subdirectory(mac)
 endif()
 
-add_subdirectory(osd)
+if(NOT TERMINAL)
+    add_subdirectory(osd)
+endif()
 
-if (QT)
+if(QT)
     add_subdirectory(qt)
+elseif(TERMINAL)
+    add_subdirectory(terminal)
 else()
     add_compile_definitions(USE_SDL_UI)
     add_subdirectory(unix)

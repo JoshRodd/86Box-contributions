@@ -117,10 +117,7 @@ PreferencesEmulator::save()
     Preferences::loadTranslators(QCoreApplication::instance());
     Preferences::reloadStrings();
     main_window->ui->retranslateUi(main_window);
-    QString vmname(vm_name);
-    if (vmname.at(vmname.size() - 1) == '"' || vmname.at(vmname.size() - 1) == '\'')
-        vmname.truncate(vmname.size() - 1);
-    main_window->setWindowTitle(QString("%1 - %2 %3").arg(vmname, EMU_NAME, EMU_VERSION_FULL));
+    main_window->setWindowTitle(MainWindow::windowTitleForVm());
     QString msg = main_window->status->getMessage();
     main_window->status.reset(new MachineStatus(main_window));
     main_window->refreshMediaMenu();

@@ -37,6 +37,10 @@
 #include "cpu.h"
 
 #include <86box/m_pcjr.h>
+#ifdef USE_TERMINAL_UI
+#    include "../terminal/terminal_renderer.h"
+#endif
+
 
 static video_timings_t timing_dram = { VIDEO_BUS, 0, 0, 0, 0, 0, 0 }; /*No additional waitstates*/
 
@@ -292,6 +296,10 @@ vid_blit_v_overscan(pcjr_t *pcjr)
     int      ho_s = vid_get_h_overscan_size(pcjr);
     int      i;
     int      x;
+#ifdef USE_TERMINAL_UI
+    const int left = vid_get_h_overscan_delta(pcjr) + ho_s / 2;
+    terminal_video_overscan(pal_lookup[cols], left, ho_s - left, 8, 8);
+#endif
 
     if (pcjr->double_type > DOUBLE_NONE) {
         y0 <<= 1;
@@ -419,6 +427,11 @@ vid_render(pcjr_t *pcjr, int line, int ho_s, int ho_d)
                     cols[1] = pcjr->array[((attr & 15) & pcjr->array[1] & 0x0f) + 16] + 16;
                     cols[0] = pcjr->array[((attr >> 4) & pcjr->array[1] & 0x0f) + 16] + 16;
                 }
+#ifdef USE_TERMINAL_UI
+                terminal_video_text_cell(x, pcjr->vc, chr,
+                                         pal_lookup[cols[1]], pal_lookup[cols[0]],
+                                         0, drawcursor);
+#endif
                 if (pcjr->scanline & 8)
                     for (uint8_t c = 0; c < 8; c++)
                         buffer32->line[line][ef_x + c] = cols[0];
@@ -444,6 +457,11 @@ vid_render(pcjr_t *pcjr, int line, int ho_s, int ho_d)
                     cols[1] = pcjr->array[((attr & 15) & pcjr->array[1] & 0x0f) + 16] + 16;
                     cols[0] = pcjr->array[((attr >> 4) & pcjr->array[1] & 0x0f) + 16] + 16;
                 }
+#ifdef USE_TERMINAL_UI
+                terminal_video_text_cell(x, pcjr->vc, chr,
+                                         pal_lookup[cols[1]], pal_lookup[cols[0]],
+                                         0, drawcursor);
+#endif
                 pcjr->memaddr++;
                 if (pcjr->scanline & 8)
                     for (uint8_t c = 0; c < 8; c++)
@@ -526,6 +544,40 @@ vid_render_process(pcjr_t *pcjr, int line, int ho_s)
 }
 
 static void
+pcjr_publish_video_mode(const pcjr_t *pcjr, int width, int height)
+{
+    const uint16_t mode = (pcjr->array[0] & 0x13) | ((pcjr->array[3] & 0x08) << 5);
+
+    video_res_x = width;
+    video_res_y = height;
+    switch (mode) {
+        case 0x13: /* 320x200x16 */
+            video_res_x /= 2;
+            video_bpp = 4;
+            break;
+        case 0x12: /* 160x200x16; render as doubled 320x200 pixels */
+            video_res_x /= 2;
+            video_bpp = 4;
+            break;
+        case 0x03: /* 640x200x4 */
+            video_bpp = 2;
+            break;
+        case 0x02: /* 320x200x4 */
+            video_res_x /= 2;
+            video_bpp = 2;
+            break;
+        case 0x102: /* 640x200x2 */
+            video_bpp = 1;
+            break;
+        default:
+            video_res_x /= (pcjr->array[0] & 1) ? 8 : 16;
+            video_res_y /= pcjr->crtc[9] + 1;
+            video_bpp = 0;
+            break;
+    }
+}
+
+static void
 vid_poll(void *priv)
 {
     pcjr_t  *pcjr = (pcjr_t *) priv;
@@ -550,6 +602,9 @@ vid_poll(void *priv)
             if (pcjr->displine < pcjr->firstline) {
                 pcjr->firstline = pcjr->displine;
                 video_wait_for_buffer();
+#ifdef USE_TERMINAL_UI
+                terminal_video_begin();
+#endif
             }
             pcjr->lastline = pcjr->displine;
             switch (pcjr->double_type) {
@@ -676,6 +731,8 @@ vid_poll(void *priv)
                                 video_force_resize_set(0);
                         }
 
+                        pcjr_publish_video_mode(pcjr, x - ho_s, actual_ys >> 1);
+
                         vid_blit_v_overscan(pcjr);
 
                         if (pcjr->double_type > DOUBLE_NONE) {
@@ -706,9 +763,6 @@ vid_poll(void *priv)
                         }
                     }
 
-                    frames++;
-                    video_res_x = xsize;
-                    video_res_y = ysize;
                 }
                 pcjr->firstline = 1000;
                 pcjr->lastline  = 0;

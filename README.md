@@ -75,6 +75,41 @@ Building
 ---------
 For instructions on how to build 86Box from source, see the [build guide](https://86box.readthedocs.io/en/latest/dev/buildguide.html).
 
+### Terminal-only build (Unix)
+
+The `terminal` preset builds the native tigt terminal frontend and C/Rust keyboard
+mapper without Qt or SDL. It requires CMake 3.20 or newer, Ninja, C11 and C++17
+compilers, Rust/Cargo with Rust 2024 edition support, and development packages for
+curses (such as ncurses), OpenAL, FreeType, libpng, libsndfile, and libslirp
+(including its GLib dependencies). Install pkg-config so CMake can discover the
+native libraries. Initialize the repository submodules, including `submodules/tigt`
+and `submodules/terminal-to-pc-keyboard`, before configuring.
+
+```sh
+git submodule update --init --recursive
+cmake --preset terminal
+cmake --build --preset terminal
+```
+
+The executable is `work/build-terminal-only/src/86Box`, including on macOS; it is
+not an application bundle. OpenAL remains enabled for floppy audio. The preset
+disables optional external synthesizers, MIDI, Discord, VNC, GUI rendering
+integrations, tests, and benchmarks, without changing the GUI presets. Native
+libraries outside the system search paths can be supplied through
+`CMAKE_PREFIX_PATH` and `PKG_CONFIG_PATH`; no Qt or Homebrew-specific paths are
+required by this preset.
+
+On macOS with Homebrew, select OpenAL Soft rather than Apple's legacy OpenAL
+framework:
+
+```sh
+cmake --preset terminal -DOpenAL_ROOT="$(brew --prefix openal-soft)"
+```
+
+This native audio dependency remains necessary without Qt. When changing an
+existing build's OpenAL selection, clear its cached discovery results with
+`-U 'OPENAL_*'` on the configure command.
+
 Licensing
 ---------
 

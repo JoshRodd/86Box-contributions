@@ -41,6 +41,9 @@
 #include <86box/vid_cga.h>
 #include <86box/vid_cga_comp.h>
 #include <86box/plat_unused.h>
+#ifdef USE_TERMINAL_UI
+#    include "../terminal/terminal_renderer.h"
+#endif
 
 #define CGA_RGB       0
 #define CGA_COMPOSITE 1
@@ -355,14 +358,18 @@ cga_render(cga_t *cga, int line)
 
     int32_t  highres_graphics_flag = (CGA_MODE_FLAG_HIGHRES_GRAPHICS | CGA_MODE_FLAG_GRAPHICS);
     bool     overlay_flag          = ((cga->cgamode & highres_graphics_flag) == highres_graphics_flag);
+    const int border = overlay_flag ? 0 : ((cga->cgacol & 0b1111) + 16);
 
     for (column = 0; column < 8; ++column) {
-        buffer32->line[line][column] = overlay_flag ? 0 : ((cga->cgacol & 0b1111) + 16);
+        buffer32->line[line][column] = border;
         if (cga->cgamode & CGA_MODE_FLAG_HIGHRES)
-            buffer32->line[line][column + (cga->crtc[CGA_CRTC_HDISP] * 8) + 8] = overlay_flag ? 0 : ((cga->cgacol & 0b1111) + 16);
+            buffer32->line[line][column + (cga->crtc[CGA_CRTC_HDISP] * 8) + 8] = border;
         else
-            buffer32->line[line][column + (cga->crtc[CGA_CRTC_HDISP] * 16) + 8] = overlay_flag ? 0 : ((cga->cgacol & 0b1111) + 16);
+            buffer32->line[line][column + (cga->crtc[CGA_CRTC_HDISP] * 16) + 8] = border;
     }
+#ifdef USE_TERMINAL_UI
+    terminal_video_overscan(pal_lookup[border], 8, 8, 4, 4);
+#endif
 
     if (cga->cgamode & CGA_MODE_FLAG_HIGHRES) { /* 80-column text */
         for (x = 0; x < cga->crtc[CGA_CRTC_HDISP]; x++) {
@@ -379,6 +386,11 @@ cga_render(cga_t *cga, int line)
                     cols[1] = cols[0];
             } else
                 cols[0] = (attr >> 4) + 16;
+#ifdef USE_TERMINAL_UI
+            terminal_video_text_cell(x, cga->vc, chr,
+                                     pal_lookup[cols[1]], pal_lookup[cols[0]],
+                                     0, drawcursor);
+#endif
 
             for (column = 0; column < 8; column++) {
                 buffer32->line[line][(x * 8) + column + 8]
@@ -409,6 +421,11 @@ cga_render(cga_t *cga, int line)
                     cols[1] = cols[0];
             } else
                 cols[0] = (attr >> 4) + 16;
+#ifdef USE_TERMINAL_UI
+            terminal_video_text_cell(x, cga->vc, chr,
+                                     pal_lookup[cols[1]], pal_lookup[cols[0]],
+                                     0, drawcursor);
+#endif
 
             for (column = 0; column < 8; column++) {
                 buffer32->line[line][(x * 16) + (column << 1) + 8]
@@ -769,6 +786,9 @@ cga_poll(void *priv)
             if (cga->displine < cga->firstline) {
                 cga->firstline = cga->displine;
                 video_wait_for_buffer();
+#ifdef USE_TERMINAL_UI
+                terminal_video_begin();
+#endif
             }
             cga->lastline = cga->displine;
             switch (cga->double_type) {
@@ -917,6 +937,23 @@ cga_poll(void *priv)
                                 video_force_resize_set(0);
                         }
 
+                        /* Publish native active geometry before the shared blit.
+                           Host line doubling and borders are not video pixels. */
+                        video_res_x = x - 16;
+                        video_res_y = cga->lastline - cga->firstline;
+                        if (cga->cgamode & CGA_MODE_FLAG_HIGHRES) {
+                            video_res_x /= 8;
+                            video_res_y /= cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR] + 1;
+                            video_bpp = 0;
+                        } else if (!(cga->cgamode & CGA_MODE_FLAG_GRAPHICS)) {
+                            video_res_x /= 16;
+                            video_res_y /= cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR] + 1;
+                            video_bpp = 0;
+                        } else if (!(cga->cgamode & CGA_MODE_FLAG_HIGHRES_GRAPHICS)) {
+                            video_res_x /= 2;
+                            video_bpp = 2;
+                        } else
+                            video_bpp = 1;
                         cga_do_blit(xsize, cga->firstline, cga->lastline, cga->double_type);
 
                         // The palette conversion has been performed, sample the lightpen position now.
@@ -931,21 +968,6 @@ cga_poll(void *priv)
                     frames++;
                     cga->lp_latch_found = false;
 
-                    video_res_x = xsize;
-                    video_res_y = ysize;
-                    if (cga->cgamode & CGA_MODE_FLAG_HIGHRES) {
-                        video_res_x /= 8;
-                        video_res_y /= cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR] + 1;
-                        video_bpp = 0;
-                    } else if (!(cga->cgamode & CGA_MODE_FLAG_GRAPHICS)) {
-                        video_res_x /= 16;
-                        video_res_y /= cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR] + 1;
-                        video_bpp = 0;
-                    } else if (!(cga->cgamode & CGA_MODE_FLAG_HIGHRES_GRAPHICS)) {
-                        video_res_x /= 2;
-                        video_bpp = 2;
-                    } else
-                        video_bpp = 1;
                 }
                 cga->firstline = 1000;
                 cga->lastline  = 0;

@@ -33,6 +33,9 @@
 #include <86box/video.h>
 #include <86box/vid_mda.h>
 #include <86box/plat_unused.h>
+#ifdef USE_TERMINAL_UI
+#include "../terminal/terminal_renderer.h"
+#endif
 
 // Enumerates MDA monitor types
 enum mda_monitor_type_e {
@@ -163,6 +166,9 @@ mda_poll(void *priv)
             if (mda->displine < mda->firstline) {
                 mda->firstline = mda->displine;
                 video_wait_for_buffer();
+#ifdef USE_TERMINAL_UI
+                terminal_video_begin();
+#endif
             }
             mda->lastline = mda->displine;
 
@@ -205,55 +211,40 @@ mda_poll(void *priv)
                         color_fg = MDA_COLOR_BLACK;
                 }
 
-                if (mda->scanline == 12
-                    && ((attr & 7) == 1)) { // underline
+                const uint32_t foreground =
+                    (mda->monitor_type == MDA_MONITOR_TYPE_RGBI && !(mda->mode & MDA_MODE_BW)) ?
+                        CGAPAL_CGA_START + color_fg : mda_attr_to_color_table[attr][blink][1];
+                const uint32_t background =
+                    (mda->monitor_type == MDA_MONITOR_TYPE_RGBI && !(mda->mode & MDA_MODE_BW)) ?
+                        CGAPAL_CGA_START + color_bg : mda_attr_to_color_table[attr][blink][0];
+                const bool underline = mda->scanline == 12 && ((attr & 7) == 1);
+#ifdef USE_TERMINAL_UI
+                terminal_video_text_cell(x, mda->vc, chr,
+                                         pal_lookup[foreground], pal_lookup[background],
+                                         underline, drawcursor);
+#endif
+
+                if (underline) {
                     for (uint32_t column = 0; column < 9; column++) {
-                        if (mda->monitor_type == MDA_MONITOR_TYPE_RGBI
-                            && !(mda->mode & MDA_MODE_BW)) {
-                            buffer32->line[mda->displine][(x * 9) + column] = CGAPAL_CGA_START + color_fg;
-                        } else
-                            buffer32->line[mda->displine][(x * 9) + column] = mda_attr_to_color_table[attr][blink][1];
+                        buffer32->line[mda->displine][(x * 9) + column] = foreground;
                     }
                 } else { // character
                     for (uint32_t column = 0; column < 8; column++) {
                         // bg=0, fg=1
                         bool is_fg = (fontdatm[chr + mda->fontbase][mda->scanline] & (1 << (column ^ 7))) ? 1 : 0;
 
-                        uint32_t font_char = mda_attr_to_color_table[attr][blink][is_fg];
-
-                        if (mda->monitor_type == MDA_MONITOR_TYPE_RGBI
-                            && !(mda->mode & MDA_MODE_BW)) {
-                            if (!is_fg)
-                                font_char = CGAPAL_CGA_START + color_bg;
-                            else
-                                font_char = CGAPAL_CGA_START + color_fg;
-                        }
-
-                        buffer32->line[mda->displine][(x * 9) + column] = font_char;
+                        buffer32->line[mda->displine][(x * 9) + column] =
+                            is_fg ? foreground : background;
                     }
 
                     // these characters (C0-DF) have their background extended to their 9th column
                     if ((chr & ~0x1f) == 0xc0) {
                         bool     is_fg        = fontdatm[chr + mda->fontbase][mda->scanline] & 1;
-                        uint32_t final_result = mda_attr_to_color_table[attr][blink][is_fg];
-
-                        if (mda->monitor_type == MDA_MONITOR_TYPE_RGBI
-                            && !(mda->mode & MDA_MODE_BW)) {
-                            if (!is_fg)
-                                final_result = CGAPAL_CGA_START + color_bg;
-                            else
-                                final_result = CGAPAL_CGA_START + color_fg;
-                        }
-
-                        buffer32->line[mda->displine][(x * 9) + 8] = final_result;
+                        buffer32->line[mda->displine][(x * 9) + 8] =
+                            is_fg ? foreground : background;
 
                     } else {
-                        if (mda->monitor_type == MDA_MONITOR_TYPE_RGBI
-                            && !(mda->mode & MDA_MODE_BW)) {
-                            buffer32->line[mda->displine][(x * 9) + 8] = CGAPAL_CGA_START + color_bg;
-
-                        } else
-                            buffer32->line[mda->displine][(x * 9) + 8] = mda_attr_to_color_table[attr][blink][0];
+                        buffer32->line[mda->displine][(x * 9) + 8] = background;
                     }
                 }
 
