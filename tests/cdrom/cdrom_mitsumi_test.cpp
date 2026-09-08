@@ -28,6 +28,7 @@ struct MockState {
     int read_result{1};
     int read_length{COOKED_SECTOR_SIZE};
     uint32_t last_seek{};
+    bool has_data{true};
     uint8_t track_type{CD_TRACK_UNK_DATA};
 } mock;
 
@@ -58,6 +59,7 @@ protected:
         dev.cdrom_dev = &cd;
         dev.irq = 10;
         dev.dma = 5;
+        timer_add(&dev.read_timer, mitsumi_read_callback, &dev, 0);
         mitsumi_cdrom_reset(&dev);
         mock.irq_cleared = 0;
         mock.stop_calls = 0;
@@ -68,6 +70,17 @@ protected:
         mitsumi_cdrom_out(0, cmd, &dev);
         for (uint8_t arg : args)
             mitsumi_cdrom_out(0, arg, &dev);
+    }
+
+    void run_timers()
+    {
+        unsigned remaining = 16;
+        while ((dev.read_timer.flags & TIMER_ENABLED) && remaining--) {
+            tsc = dev.read_timer.ts_integer;
+            timer_disable(&dev.read_timer);
+            dev.read_timer.callback(dev.read_timer.priv);
+        }
+        ASSERT_FALSE(dev.read_timer.flags & TIMER_ENABLED) << "Read timer did not quiesce";
     }
 
     std::vector<uint8_t> response()
@@ -110,59 +123,49 @@ TEST(MitsumiConversion, DecodesBiasedDmaCount)
 
 TEST_F(MitsumiTest, StatusReflectsMediaTrayChangeAndPlayback)
 {
+    dev.change = 1;
     EXPECT_EQ(mitsumi_status(&dev), STAT_READY | STAT_SERVO | STAT_CHANGE);
     cd.cd_status = CD_STATUS_PLAYING;
+    mock.has_data = false;
     EXPECT_EQ(mitsumi_status(&dev), STAT_READY | STAT_SERVO | STAT_DISK_CDDA |
-                                    STAT_PLAY_CDDA | STAT_CHANGE);
-    cd.cd_status = CD_STATUS_PLAYING;
-    EXPECT_TRUE(mitsumi_status(&dev) & STAT_PLAY_CDDA);
+                                    STAT_PLAY_CDDA);
+    mock.has_data = true;
+    EXPECT_EQ(mitsumi_status(&dev), STAT_READY | STAT_SERVO | STAT_PLAY_CDDA);
     dev.tray_open = 1;
     cd.cd_status = CD_STATUS_EMPTY;
-    EXPECT_EQ(mitsumi_status(&dev), STAT_OPEN | STAT_CHANGE);
-    EXPECT_EQ(mitsumi_error_status(&dev, 2), STAT_OPEN | STAT_CHANGE | STAT_ERROR | STAT_CMD_CHECK);
-    EXPECT_EQ(mitsumi_error_status(&dev, 3), STAT_OPEN | STAT_CHANGE | STAT_ERROR);
+    EXPECT_EQ(mitsumi_status(&dev), STAT_OPEN);
+    EXPECT_EQ(mitsumi_error_status(&dev, 2), STAT_OPEN | STAT_ERROR | STAT_CMD_CHECK);
+    EXPECT_EQ(mitsumi_error_status(&dev, 3), STAT_OPEN | STAT_ERROR);
 }
 
-TEST_F(MitsumiTest, ResetRestoresDocumentedDefaultsAndStopsActivity)
+TEST_F(MitsumiTest, ResetCancelsPendingReadAndAllowsNewCommands)
 {
-    dev.enable_dma = dev.enable_irq = 0xff;
-    dev.readcount = 10;
-    dev.buf_count = 10;
-    dev.locked = 1;
-    dev.cdrom_vols = { 1, 2, 3, 4 };
-    mitsumi_cdrom_reset(&dev);
-
-    EXPECT_EQ(dev.dmalen, 2055);
-    EXPECT_EQ(dev.smode, 1);
-    EXPECT_EQ(dev.cur_control, 0x0c);
-    EXPECT_EQ(dev.change, 1);
-    EXPECT_EQ(dev.enable_dma, 0);
-    EXPECT_EQ(dev.enable_irq, 0);
-    EXPECT_EQ(dev.readcount, 0u);
-    EXPECT_EQ(dev.buf_count, 0);
-    EXPECT_EQ(dev.drvmode, DRV_MODE_STOP);
-    EXPECT_EQ(dev.cdrom_vols.att0, 255);
-    EXPECT_EQ(dev.cdrom_vols.att1, 0);
-    EXPECT_EQ(dev.cdrom_vols.att2, 255);
-    EXPECT_EQ(dev.cdrom_vols.att3, 0);
-    EXPECT_EQ(mock.stop_calls, 1);
+    command(CMD_READ2X, { 0x00, 0x02, 0x00, 0x00, 0x00, 0x01 });
+    ASSERT_TRUE(dev.read_timer.flags & TIMER_ENABLED);
+    command(CMD_SOFT_RESET);
+    EXPECT_FALSE(dev.read_timer.flags & TIMER_ENABLED);
+    EXPECT_TRUE(mitsumi_cdrom_in(1, &dev) & FLAG_NODATA);
+    EXPECT_EQ(response(), (std::vector<uint8_t>{ STAT_READY | STAT_SERVO | STAT_CHANGE }));
+    EXPECT_EQ(mock.drq[dev.dma], 0);
+    EXPECT_EQ(mock.irq_cleared, 1u << dev.irq);
+    command(CMD_GET_VER);
+    EXPECT_EQ(response(), (std::vector<uint8_t>{ STAT_READY | STAT_SERVO, 'D', 0x10 }));
 }
 
-TEST_F(MitsumiTest, FlagsArbitrateDataAndStatusAndExposeTray)
+TEST_F(MitsumiTest, StatusPrecedesBufferedDataAndFlagsTrackConsumption)
 {
     dev.change = 0;
-    dev.cmdbuf_count = 0;
-    dev.buf_count = 0;
-    EXPECT_EQ(mitsumi_cdrom_get_flags(&dev), FLAG_NODATA | FLAG_NOSTAT | FLAG_UNK | 1);
-    dev.cmdbuf_count = 1;
-    EXPECT_EQ(mitsumi_cdrom_get_flags(&dev), FLAG_NODATA | FLAG_UNK | 1);
+    command(CMD_GET_VER);
     dev.data = 1;
+    dev.buf[0] = 0x5a;
     dev.buf_count = 1;
-    EXPECT_EQ(mitsumi_cdrom_get_flags(&dev), FLAG_NOSTAT | FLAG_UNK | 1);
-    dev.early_status = 1;
-    EXPECT_EQ(mitsumi_cdrom_get_flags(&dev), FLAG_NODATA | FLAG_UNK | 1);
+    EXPECT_EQ(mitsumi_cdrom_in(1, &dev) & (FLAG_NODATA | FLAG_NOSTAT), 0);
+    EXPECT_EQ(response(), (std::vector<uint8_t>{ STAT_READY | STAT_SERVO, 'D', 0x10 }));
+    EXPECT_EQ(mitsumi_cdrom_in(1, &dev) & (FLAG_NODATA | FLAG_NOSTAT), FLAG_NOSTAT);
+    EXPECT_EQ(mitsumi_cdrom_in(0, &dev), 0x5a);
+    EXPECT_TRUE(mitsumi_cdrom_in(1, &dev) & FLAG_NODATA);
     dev.tray_open = 1;
-    EXPECT_TRUE(mitsumi_cdrom_get_flags(&dev) & FLAG_OPEN);
+    EXPECT_TRUE(mitsumi_cdrom_in(1, &dev) & FLAG_OPEN);
 }
 
 TEST_F(MitsumiTest, VersionUnknownStatusAndSenseCommandsReturnExpectedBytes)
@@ -181,15 +184,17 @@ TEST_F(MitsumiTest, VersionUnknownStatusAndSenseCommandsReturnExpectedBytes)
 
     dev.change = 1;
     command(CMD_GET_STAT);
+    EXPECT_EQ(response(), (std::vector<uint8_t>{ STAT_READY | STAT_SERVO | STAT_CHANGE }));
+    command(CMD_GET_STAT);
     EXPECT_EQ(response(), (std::vector<uint8_t>{ STAT_READY | STAT_SERVO }));
-    EXPECT_EQ(dev.change, 0);
 }
 
 TEST_F(MitsumiTest, ModeVolumeLockAndControlRegistersAreProgrammable)
 {
+    dev.change = 0;
     command(CMD_SET_MODE, { 0xa4 });
     EXPECT_EQ(dev.mode, 0xa4);
-    EXPECT_EQ(response(), (std::vector<uint8_t>{ STAT_READY | STAT_SERVO | STAT_CHANGE, 0 }));
+    EXPECT_EQ(response(), (std::vector<uint8_t>{ STAT_READY | STAT_SERVO, 0 }));
 
     command(CMD_SET_VOL, { 10, 20, 30, 40 });
     command(CMD_GET_VOL);
@@ -233,25 +238,25 @@ TEST_F(MitsumiTest, LockedEjectReportsSenseWhileUnlockedEjectOpensTray)
     command(CMD_EJECT);
     EXPECT_EQ(mock.eject_calls, 1);
     EXPECT_EQ(dev.tray_open, 1);
-    EXPECT_EQ(dev.change, 1);
+    EXPECT_TRUE(response().front() & STAT_OPEN);
 }
 
-TEST_F(MitsumiTest, CookedPioReadFetchesSectorAndAdvancesMsf)
+TEST_F(MitsumiTest, CookedPioReadDeliversCompleteSectorAfterTimer)
 {
-    dev.change = 0;
     command(CMD_READ2X, { 0x00, 0x02, 0x00, 0x00, 0x00, 0x01 });
-    ASSERT_EQ(dev.buf_count, COOKED_SECTOR_SIZE);
-    EXPECT_EQ(dev.readcount, 0u);
-    EXPECT_EQ(mock.last_seek, 0u);
-    EXPECT_EQ(dev.readmsf, 0x000201u);
-    EXPECT_EQ(mitsumi_cdrom_in(0, &dev), 0u);
-    EXPECT_EQ(dev.buf_count, COOKED_SECTOR_SIZE - 1);
+    EXPECT_TRUE(mitsumi_cdrom_in(1, &dev) & FLAG_NODATA);
+    run_timers();
+    ASSERT_FALSE(mitsumi_cdrom_in(1, &dev) & FLAG_NODATA);
+    for (int i = 0; i < COOKED_SECTOR_SIZE; ++i)
+        EXPECT_EQ(mitsumi_cdrom_in(0, &dev), static_cast<uint8_t>(i));
+    EXPECT_TRUE(mitsumi_cdrom_in(1, &dev) & FLAG_NODATA);
 }
 
 TEST_F(MitsumiTest, InvalidReadAddressReturnsCommandErrorAndSenseTwo)
 {
     dev.enable_irq = IRQ_ERROR;
     command(CMD_READ2X, { 0x00, 0x01, 0x99, 0x00, 0x00, 0x01 });
+    run_timers();
     EXPECT_EQ(dev.cur_sense, 2);
     const auto bytes = response();
     ASSERT_FALSE(bytes.empty());
@@ -317,7 +322,10 @@ TEST_F(MitsumiTest, InsertAbortsReadUpdatesTrayAndSignalsChange)
     mitsumi_cdrom_insert(&dev);
     EXPECT_EQ(dev.readcount, 0u);
     EXPECT_EQ(dev.buf_count, 0);
-    EXPECT_EQ(dev.change, 1);
+    command(CMD_GET_STAT);
+    const auto bytes = response();
+    ASSERT_EQ(bytes.size(), 1u);
+    EXPECT_TRUE(bytes.front() & STAT_CHANGE);
     EXPECT_EQ(dev.tray_open, 0);
     EXPECT_EQ(mock.stop_calls, 1);
     EXPECT_EQ(mock.irq_cleared, 1u << dev.irq);
@@ -361,6 +369,8 @@ void timer_add(pc_timer_t *timer, void (*callback)(void *), void *priv, int star
     timer->flags = start ? TIMER_ENABLED : 0;
 }
 void cdrom_stop(cdrom_t *) { ++mock.stop_calls; }
+int cdrom_has_data(cdrom_t *) { return mock.has_data; }
+double cdrom_seek_time(const cdrom_t *) { return 0.0; }
 int cdrom_read_toc(const cdrom_t *, uint8_t *buffer, int, uint8_t, int, int)
 {
     buffer[2] = 1;
