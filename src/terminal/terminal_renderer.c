@@ -9,6 +9,7 @@
 
 #include <86box/86box.h>
 #include <86box/keyboard.h>
+#include <86box/machine.h>
 #include <86box/video.h>
 #include <tigt.h>
 #include <tigt_keyboard.h>
@@ -16,6 +17,7 @@
 
 
 static void *terminal_keyboard;
+static uint16_t terminal_print_screen_key, terminal_pause_key;
 static bool terminal_initialized;
 static bool terminal_suspended;
 
@@ -41,6 +43,53 @@ terminal_blit(int x, int y, int width, int height, int monitor_index)
     video_blit_complete_monitor(monitor_index);
 }
 
+static void *
+terminal_keyboard_create(void)
+{
+    terminal_print_screen_key = terminal_pause_key = 0;
+    const bool at = keyboard_type != KEYBOARD_TYPE_PC_XT &&
+                    (keyboard_type != KEYBOARD_TYPE_INTERNAL ||
+                     machine_has_bus(machine, MACHINE_BUS_AT_KBD));
+    return pc_xt_keyboard_v1_create(at ? PC_XT_KEYBOARD_V1_AT_SET1 :
+                                        PC_XT_KEYBOARD_V1_XT_SET1);
+}
+
+static void
+terminal_key(int down, uint16_t key)
+{
+    /* Keep each special key's press-time identity until release: the mapper
+       may release a synthesized modifier before releasing the key itself. */
+    if (key == 0x137) {
+        if (down && !terminal_print_screen_key)
+            terminal_print_screen_key =
+                (keyboard_recv_ui(0x38) || keyboard_recv_ui(0x138)) ? 0x54 : 0x137;
+        key = terminal_print_screen_key;
+        if (!key)
+            return;
+        if (key == 0x137 && down)
+            keyboard_input(1, 0x12a);
+        keyboard_input(down, key);
+        if (!down) {
+            if (key == 0x137)
+                keyboard_input(0, 0x12a);
+            terminal_print_screen_key = 0;
+        }
+    } else if (key == 0x145) {
+        if (down && !terminal_pause_key)
+            terminal_pause_key =
+                (keyboard_recv_ui(0x1d) || keyboard_recv_ui(0x11d)) ? 0x146 : 0x45;
+        key = terminal_pause_key;
+        if (!key)
+            return;
+        if (key == 0x45)
+            keyboard_input(down, 0xe11d);
+        keyboard_input(down, key);
+        if (!down)
+            terminal_pause_key = 0;
+    } else
+        keyboard_input(down, key);
+}
+
 static void
 terminal_input(const tigt_input_event *event, void *user)
 {
@@ -56,12 +105,13 @@ terminal_input(const tigt_input_event *event, void *user)
             return;
         }
     }
-    uint8_t bytes[PC_XT_KEYBOARD_V1_EVENT_MAX_BYTES];
-    const size_t count = tigt_keyboard_handle(terminal_keyboard, event, bytes, sizeof(bytes));
+    pc_xt_keyboard_v1_key_event keys[PC_XT_KEYBOARD_V1_EVENT_MAX_KEYS];
+    const size_t count = tigt_keyboard_handle(terminal_keyboard, event, keys,
+                                             PC_XT_KEYBOARD_V1_EVENT_MAX_KEYS);
     if (count == PC_XT_KEYBOARD_V1_ERROR)
         return;
     for (size_t index = 0; index < count; index++)
-        keyboard_input_set1(bytes[index]);
+        terminal_key(keys[index].down, keys[index].key);
 }
 
 void
@@ -70,7 +120,7 @@ terminal_renderer_init(void)
     video_setblit(terminal_blit);
     if (terminal_initialized || !isatty(STDOUT_FILENO))
         return;
-    terminal_keyboard = pc_xt_keyboard_v1_create(PC_XT_KEYBOARD_V1_XT_SET1);
+    terminal_keyboard = terminal_keyboard_create();
     if (terminal_keyboard == NULL)
         fatal("Terminal: could not create keyboard mapper\n");
     const tigt_config config = { TIGT_ABI_VERSION, terminal_input, NULL };
@@ -102,7 +152,7 @@ terminal_renderer_resume(void)
 {
     if (!terminal_initialized || !terminal_suspended)
         return;
-    terminal_keyboard = pc_xt_keyboard_v1_create(PC_XT_KEYBOARD_V1_XT_SET1);
+    terminal_keyboard = terminal_keyboard_create();
     if (terminal_keyboard == NULL)
         fatal("Terminal: could not recreate keyboard mapper\n");
     const int result = tigt_resume();
