@@ -171,11 +171,16 @@ mda_poll(void *priv)
 #endif
             }
             mda->lastline = mda->displine;
+            const bool video_enabled = (mda->mode & MDA_MODE_VIDEO_ENABLE) != 0;
 
             for (uint32_t x = 0; x < mda->crtc[MDA_CRTC_HDISP]; x++) {
-                chr        = mda->vram[(mda->memaddr << 1) & 0xfff];
-                attr       = mda->vram[((mda->memaddr << 1) + 1) & 0xfff];
-                drawcursor = ((mda->memaddr == cursoraddr) && mda->cursorvisible && mda->cursoron);
+                /* Video disable blanks the output without stopping the CRTC. */
+                if (video_enabled) {
+                    chr  = mda->vram[(mda->memaddr << 1) & 0xfff];
+                    attr = mda->vram[((mda->memaddr << 1) + 1) & 0xfff];
+                } else
+                    chr = attr = 0;
+                drawcursor = (video_enabled && (mda->memaddr == cursoraddr) && mda->cursorvisible && mda->cursoron);
                 blink      = ((mda->blink & 16) && (mda->mode & MDA_MODE_BLINK) && (attr & 0x80) && !drawcursor);
 
                 // Colours that will be used
