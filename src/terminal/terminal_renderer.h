@@ -12,15 +12,21 @@ void terminal_renderer_init(void);
 void terminal_renderer_close(void);
 void terminal_renderer_suspend(void);
 void terminal_renderer_resume(void);
+/* Nonblocking presenter stdin pump; call on the presentation/emulation thread,
+   including paused iterations with no video frames. Curses polls independently. */
+void terminal_renderer_poll_input(void);
 /* Native video renderers publish resolved cells while walking the beam. The
    shared blit boundary submits that frame; no VRAM or registers cross here. */
 void terminal_video_begin(void);
 void terminal_video_text_cell(uint16_t column, uint16_t row, uint8_t character,
                               uint32_t foreground, uint32_t background,
                               int underline, int cursor);
-/* Output-only modes sample coherent text memory and CRTC state at vsync.
+/* Presenter modes sample coherent text memory and CRTC state at vsync.
    The existing curses renderer still consumes rasterized cells.
-   pcjr_array is the 32 gate-array registers, or NULL for CGA/MDA. */
+   pcjr_array is the 32 gate-array registers, or NULL for CGA/MDA.
+   Mode bit 3 is hardware video enable, including synthesized PCjr mode.
+   VRAM must expose the full 4KB MDA or 16KB CGA/PCjr aperture: hidden bytes
+   and attributes also cancel the presenter's hardware-disable hold. */
 void terminal_video_snapshot(const uint8_t *vram, const uint8_t *crtc,
                               uint8_t mode, int monochrome, const uint8_t *pcjr_array);
 /* Border dimensions are native pixels, before host scanline doubling. */

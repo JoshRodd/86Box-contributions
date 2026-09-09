@@ -52,6 +52,33 @@ void fatal(const char *fmt, ...)
     abort();
 }
 
+/* Raster-only fixtures must never activate stdin. */
+int machine, keyboard_type;
+int machine_has_bus(int m, uintptr_t flags) { (void) m; (void) flags; abort(); }
+void keyboard_input(int down, uint16_t scan) { (void) down; (void) scan; abort(); }
+int keyboard_recv_ui(uint16_t scan) { (void) scan; abort(); }
+void keyboard_all_up(void) { abort(); }
+
+void timer_enable(pc_timer_t *timer) { (void) timer; }
+void picint_common(uint16_t num, int level, int set, uint8_t *state)
+{
+    (void) num; (void) level; (void) set; (void) state;
+}
+void video_wait_for_buffer_monitor(int monitor) { (void) monitor; }
+uint8_t video_force_resize_get_monitor(int monitor) { (void) monitor; return 0; }
+void video_force_resize_set_monitor(uint8_t res, int monitor) { (void) res; (void) monitor; }
+void set_screen_size(int x, int y) { (void) x; (void) y; }
+void video_blit_memtoscreen_monitor(int x, int y, int w, int h, int monitor)
+{
+    (void) x; (void) y; (void) w; (void) h; (void) monitor;
+    abort(); /* The coherent-vsync fixture has no raster region to blit. */
+}
+void cga_blit_memtoscreen(int x, int y, int w, int h, int double_type)
+{
+    (void) x; (void) y; (void) w; (void) h; (void) double_type;
+    abort();
+}
+
 void hline(bitmap_t *bitmap, int x1, int y, int x2, uint32_t color)
 {
     for (int x = x1; x < x2; x++)
@@ -88,6 +115,63 @@ static void draw(pcjr_t *pcjr, uint8_t mode, uint16_t address)
     terminal_video_overscan(rgb[20], 16, 16, 8, 8);
     terminal_video_blit(0, 0, 64, 24, 0);
     assert(submitted_columns == 2 && submitted_rows == 1);
+}
+
+static void coherent_vsync(pcjr_t *pcjr)
+{
+    /* Execute the native vsync callback, including its gate-array mode
+       synthesis. Skip only the subsequent bitmap blit, not the presenter. */
+    pcjr->linepos = 1;
+    pcjr->vc = pcjr->scanline = pcjr->vadj = 0;
+    pcjr->crtc[4] = 10;
+    pcjr->crtc[7] = 1;
+    pcjr->crtc[9] = 0;
+    pcjr->firstline = 0;
+    pcjr->lastline = -1;
+    vid_poll(pcjr);
+}
+
+static void coherent_video_enable(void)
+{
+    FILE *output = tmpfile();
+    assert(output);
+    const tigt_presenter_config config = {
+        TIGT_PRESENTER_ABI_VERSION, fileno(output),
+        TIGT_PRESENT_GLASS, TIGT_ENCODING_ASCII, 0
+    };
+    assert(tigt_presenter_create(&config, &terminal_presenter) == TIGT_OK);
+    pcjr_t pcjr = { 0 };
+    pcjr.vram = vram;
+    pcjr.crtc[1] = 2; pcjr.crtc[6] = 1; pcjr.crtc[15] = 1;
+    pcjr.array[0] = 8; pcjr.array[1] = 15;
+    for (unsigned color = 0; color < 16; color++)
+        pcjr.array[16 + color] = color;
+    memset(vram, 0, sizeof(vram));
+    vram[0] = 'A'; vram[1] = 7; vram[2] = ' '; vram[3] = 7;
+    coherent_vsync(&pcjr);
+    assert(lseek(fileno(output), 0, SEEK_CUR) == 1);
+    pcjr.array[0] = 0;
+    for (unsigned i = 1; i < 12; i++) {
+        coherent_vsync(&pcjr);
+        assert(lseek(fileno(output), 0, SEEK_CUR) == 1);
+    }
+    /* Attribute-only hidden mutation cannot disappear behind blank decoding. */
+    vram[sizeof(vram) - 1] = 1;
+    coherent_vsync(&pcjr);
+    const off_t cleared = lseek(fileno(output), 0, SEEK_CUR);
+    assert(cleared > 1);
+    char bytes[32] = { 0 };
+    assert(pread(fileno(output), bytes, sizeof(bytes) - 1, 0) == cleared);
+    assert(strcmp(bytes, "A\r \r") == 0);
+    pcjr.array[0] = 8;
+    coherent_vsync(&pcjr);
+    assert(pread(fileno(output), bytes, sizeof(bytes) - 1, 0) == cleared + 1);
+    assert(strcmp(bytes, "A\r \rA") == 0);
+    tigt_presenter_destroy(terminal_presenter);
+    terminal_presenter = NULL;
+    tigt_video_destroy(terminal_text_decoders[0][0]);
+    terminal_text_decoders[0][0] = NULL;
+    fclose(output);
 }
 
 int main(void)
@@ -181,6 +265,7 @@ int main(void)
         }
     }
     assert(bitmap_submissions == 4);
+    coherent_video_enable();
     puts("PASS native PCjr text palette, mask, latched address, blink, cursor and border");
     return 0;
 }

@@ -49,6 +49,13 @@ void fatal(const char *fmt, ...)
     abort();
 }
 
+/* Raster-only fixtures must never activate stdin. */
+int machine, keyboard_type;
+int machine_has_bus(int m, uintptr_t flags) { (void) m; (void) flags; abort(); }
+void keyboard_input(int down, uint16_t scan) { (void) down; (void) scan; abort(); }
+int keyboard_recv_ui(uint16_t scan) { (void) scan; abort(); }
+void keyboard_all_up(void) { abort(); }
+
 /* Host services are inert; palette conversion and MDA scanout remain real. */
 void timer_enable(pc_timer_t *timer) { (void) timer; }
 void timer_add(pc_timer_t *timer, void (*callback)(void *), void *priv, int start_timer)

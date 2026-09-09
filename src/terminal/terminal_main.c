@@ -51,6 +51,8 @@ terminal_install_signal_handlers(void)
     sigemptyset(&action.sa_mask);
     sigaction(SIGINT, &action, NULL);
     sigaction(SIGTERM, &action, NULL);
+    sigaction(SIGHUP, &action, NULL);
+    sigaction(SIGQUIT, &action, NULL);
     sigaction(SIGTSTP, &action, NULL);
 }
 
@@ -134,6 +136,7 @@ main(int argc, char **argv)
             terminal_suspend_requested = 0;
             terminal_suspend();
         }
+        terminal_renderer_poll_input();
         if (debt_ns >= quantum_ns && !dopause) {
             pc_run();
             debt_ns -= quantum_ns;

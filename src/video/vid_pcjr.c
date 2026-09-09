@@ -704,7 +704,7 @@ vid_poll(void *priv)
                 if (pcjr->crtc[7]) {
 #ifdef USE_TERMINAL_UI
                     terminal_video_snapshot(pcjr->vram, pcjr->crtc,
-                        8 | (pcjr->array[0] & 2) | ((pcjr->array[3] & 4) ? 0x20 : 0), 0,
+                        (pcjr->array[0] & 0x0a) | ((pcjr->array[3] & 4) ? 0x20 : 0), 0,
                         pcjr->array);
 #endif
                     if (pcjr->array[0] & 1)
