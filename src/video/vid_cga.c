@@ -899,6 +899,9 @@ cga_poll(void *priv)
                 cga->displine  = 0;
                 cga->vsynctime = 16;
                 if (cga->crtc[CGA_CRTC_VSYNC]) {
+#ifdef USE_TERMINAL_UI
+                    terminal_video_snapshot(cga->vram, cga->crtc, cga->cgamode, 0, NULL);
+#endif
                     if (cga->cgamode & CGA_MODE_FLAG_HIGHRES)
                         x = (cga->crtc[CGA_CRTC_HDISP] * 8) + 16;
                     else

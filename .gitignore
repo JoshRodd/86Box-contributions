@@ -72,3 +72,7 @@ CMakeLists.txt.user
 *.patch
 *.*.orig
 *.*.rej
+
+# Local AGENTS.md file
+AGENTS.md
+.gitignore

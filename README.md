@@ -110,6 +110,17 @@ This native audio dependency remains necessary without Qt. When changing an
 existing build's OpenAL selection, clear its cached discovery results with
 `-U 'OPENAL_*'` on the configure command.
 
+For output-only text presentation, set `TIGT_PRESENTATION=glass` to stream
+glass-TTY output to stdout (including redirected output), `adaptive` for one-way
+full-screen fallback, or `adaptive-reversible` to return after a clear followed
+by representable text. Adaptive modes require stdout to be a TTY, use the normal
+screen rather than the alternate screen, and clip to smaller host windows.
+These modes do not read stdin or enable raw input. Unset the variable for the
+existing interactive curses frontend. An unrepresentable glass-TTY update is
+confirmed for 100 ms before the frontend reports failure; adaptive modes instead
+fall back to full-screen presentation. Use `--logfile` to keep emulator logs
+separate from the guest stdout stream.
+
 Licensing
 ---------
 

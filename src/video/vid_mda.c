@@ -334,6 +334,9 @@ mda_poll(void *priv)
                 mda->vsynctime = 16;
                 video_lightpen_vsync();
                 if (mda->crtc[MDA_CRTC_VSYNC]) {
+#ifdef USE_TERMINAL_UI
+                    terminal_video_snapshot(mda->vram, mda->crtc, mda->mode, 1, NULL);
+#endif
                     uint32_t x = mda->crtc[MDA_CRTC_HDISP] * 9;
                     mda->lastline++;
                     if ((x != xsize) || ((mda->lastline - mda->firstline) != ysize) || video_force_resize_get()) {

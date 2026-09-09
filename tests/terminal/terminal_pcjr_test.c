@@ -46,6 +46,12 @@ int monitor_index_global;
 int enable_overscan;
 uint8_t fontdat[2048][8];
 
+void fatal(const char *fmt, ...)
+{
+    fputs(fmt, stderr);
+    abort();
+}
+
 void hline(bitmap_t *bitmap, int x1, int y, int x2, uint32_t color)
 {
     for (int x = x1; x < x2; x++)
