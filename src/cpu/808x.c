@@ -42,6 +42,9 @@
 #include <86box/plat_unused.h>
 #include "vx0_biu.h"
 #include "808x_marty_86box.h"
+#ifdef USE_TERMINAL_UI
+#include "../terminal/terminal_renderer.h"
+#endif
 
 /* Is the CPU 8088 or 8086. */
 int is8086 = 0;
@@ -1150,6 +1153,15 @@ interrupt(uint16_t addr)
     uint16_t new_cs, new_ip;
     uint16_t tempf;
 
+#ifdef USE_TERMINAL_UI
+    if ((addr == 0x10 || addr == 0x21) && terminal_boot_trace_enabled()) {
+        const uint16_t regs[14] = {
+            AX, BX, CX, DX, SI, DI, BP, SP, CS, cpu_state.pc,
+            DS, ES, SS, cpu_state.flags
+        };
+        terminal_boot_trace_interrupt(addr, regs, ram, (size_t) mem_size * 1024);
+    }
+#endif
     addr <<= 2;
     cpu_state.eaaddr = addr;
     old_cs           = CS;

@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <string.h>
+#include <time.h>
 
 #include <86box/86box.h>
 #include <86box/keyboard.h>
@@ -24,6 +25,110 @@ static bool terminal_initialized;
 static bool terminal_suspended;
 static tigt_presenter *terminal_presenter;
 static tigt_video *terminal_text_decoders[MONITORS_NUM][2];
+
+/* One ordered stream shared by CPU observations and coherent video callbacks.
+   Disabled by default; no emulated cycles, registers or memory are modified. */
+static FILE *boot_trace;
+static int boot_trace_checked;
+static unsigned long long boot_trace_sequence;
+
+int
+terminal_boot_trace_enabled(void)
+{
+    if (!boot_trace_checked) {
+        boot_trace_checked = 1;
+        const char *path = getenv("86BOX_BOOT_TRACE");
+        if (path && *path) {
+            boot_trace = fopen(path, "wx");
+            if (!boot_trace)
+                fatal("Terminal: cannot create boot trace %s\n", path);
+        }
+    }
+    return boot_trace != NULL;
+}
+
+static void
+boot_trace_prefix(const char *kind)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    fprintf(boot_trace, "{\"kind\":\"%s\",\"seq\":%llu,\"host_ns\":%llu",
+            kind, ++boot_trace_sequence,
+            (unsigned long long) now.tv_sec * 1000000000ULL + now.tv_nsec);
+}
+
+static void
+boot_trace_hex(const uint8_t *bytes, size_t count)
+{
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < count; i++) {
+        fputc(hex[bytes[i] >> 4], boot_trace);
+        fputc(hex[bytes[i] & 15], boot_trace);
+    }
+}
+
+void
+terminal_boot_trace_interrupt(unsigned vector, const uint16_t regs[14],
+                              const uint8_t *ram, size_t ram_size)
+{
+    if (!terminal_boot_trace_enabled())
+        return;
+    boot_trace_prefix("int");
+    fprintf(boot_trace, ",\"vector\":%u,\"regs\":[", vector);
+    for (unsigned i = 0; i < 14; i++)
+        fprintf(boot_trace, "%s%u", i ? "," : "", regs[i]);
+    fputs("],\"bda_hex\":\"", boot_trace);
+    if (ram_size >= 0x467)
+        boot_trace_hex(ram + 0x449, 0x1e);
+    fputs("\",\"buffer_hex\":\"", boot_trace);
+    const unsigned ah = regs[0] >> 8;
+    unsigned segment = regs[10], offset = regs[3], requested = 0;
+    int dollar_terminated = 0, truncated = 0;
+    if (vector == 0x21 && ah == 9) {
+        requested = 4096;
+        dollar_terminated = 1;
+    } else if (vector == 0x21 && ah == 0x40)
+        requested = regs[2];
+    else if (vector == 0x10 && ah == 0x13) {
+        segment = regs[11];
+        offset = regs[6];
+        requested = regs[2] * ((regs[0] & 2) ? 2 : 1);
+    }
+    unsigned i;
+    for (i = 0; i < requested && i < 4096; i++) {
+        const size_t address = ((segment << 4) + ((offset + i) & 0xffff)) & 0xfffff;
+        if (address >= ram_size) {
+            truncated = 1;
+            break;
+        }
+        if (dollar_terminated && ram[address] == '$')
+            break;
+        boot_trace_hex(ram + address, 1);
+    }
+    if ((dollar_terminated && i == requested) || (i < requested && i == 4096))
+        truncated = 1;
+    fprintf(boot_trace, "\",\"truncated\":%s}\n", truncated ? "true" : "false");
+    fflush(boot_trace);
+}
+
+static void
+boot_trace_frame(const uint8_t *vram, const uint8_t *crtc,
+                 uint8_t mode, int monochrome)
+{
+    if (!terminal_boot_trace_enabled())
+        return;
+    const unsigned aperture = monochrome ? 4096 : 16384;
+    const unsigned start = (crtc[12] << 8) | crtc[13];
+    const unsigned cursor = (((crtc[14] << 8) | crtc[15]) - start) & (aperture / 2 - 1);
+    boot_trace_prefix("frame");
+    fprintf(boot_trace, ",\"mono\":%d,\"mode\":%u,\"columns\":%u,\"rows\":%u,"
+            "\"cursor\":%u,\"crtc_hex\":\"", !!monochrome, mode, crtc[1], crtc[6], cursor);
+    boot_trace_hex(crtc, 18);
+    fputs("\",\"vram_hex\":\"", boot_trace);
+    boot_trace_hex(vram, aperture);
+    fputs("\"}\n", boot_trace);
+    fflush(boot_trace);
+}
 
 #define TERMINAL_TEXT_COLUMNS 320
 #define TERMINAL_TEXT_ROWS 128
@@ -263,6 +368,7 @@ void
 terminal_video_snapshot(const uint8_t *vram, const uint8_t *crtc,
                          uint8_t mode, int monochrome, const uint8_t *pcjr_array)
 {
+    boot_trace_frame(vram, crtc, mode, monochrome);
     if (!terminal_presenter || terminal_suspended || !crtc[1] || !crtc[6])
         return;
     if (!monochrome && (mode & 2))

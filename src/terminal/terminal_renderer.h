@@ -2,6 +2,12 @@
 #define TERMINAL_RENDERER_H
 
 #include <stdint.h>
+#include <stddef.h>
+/* Opt-in, read-only boot evidence. Registers are AX..DX, SI, DI, BP, SP,
+   CS, IP, DS, ES, SS, FLAGS; guest memory is never read through device hooks. */
+int terminal_boot_trace_enabled(void);
+void terminal_boot_trace_interrupt(unsigned vector, const uint16_t regs[14],
+                                   const uint8_t *ram, size_t ram_size);
 void terminal_renderer_init(void);
 void terminal_renderer_close(void);
 void terminal_renderer_suspend(void);

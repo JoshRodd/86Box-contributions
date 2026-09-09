@@ -67,6 +67,9 @@
 #include "x86.h"
 
 #include "808x_marty_86box.h"
+#ifdef USE_TERMINAL_UI
+#include "../terminal/terminal_renderer.h"
+#endif
 
 /* cpu.h exposes the architectural registers as preprocessor aliases.  This
  * translation unit uses the same short names for the private core state. */
@@ -2559,6 +2562,16 @@ interrupt_routine(m808x_cpu_t *icpu, const uint8_t vector, const bool skip_first
 static void
 software_interrupt(m808x_cpu_t *icpu, uint8_t vector)
 {
+#ifdef USE_TERMINAL_UI
+    if ((vector == 0x10 || vector == 0x21) && terminal_boot_trace_enabled()) {
+        const uint16_t registers[14] = {
+            AX, BX, CX, DX, SI, DI, BP, SP, icpu->segs[SEG_CS],
+            architectural_ip(icpu), icpu->segs[SEG_DS], icpu->segs[SEG_ES],
+            icpu->segs[SEG_SS], icpu->flags
+        };
+        terminal_boot_trace_interrupt(vector, registers, ram, (size_t) mem_size * 1024);
+    }
+#endif
     interrupt_routine(icpu, vector, false);
 }
 

@@ -121,6 +121,16 @@ confirmed for 100 ms before the frontend reports failure; adaptive modes instead
 fall back to full-screen presentation. Use `--logfile` to keep emulator logs
 separate from the guest stdout stream.
 
+For opt-in boot diagnostics in a terminal build, set `86BOX_BOOT_TRACE` to a
+new file path. An existing file is never overwritten; failure to create the
+trace stops the emulator. The JSONL stream combines ordered, host-timestamped
+CGA/MDA/PCjr text-memory snapshots with INT 10h and INT 21h entry observations
+from either 8088/8086 CPU core. Interrupt records include registers, BIOS video
+state, and bounded output-buffer captures where applicable. Tracing does not
+modify guest registers or memory, but synchronous writes add host overhead and
+frame snapshots can produce large files containing guest data. Leave the
+variable unset for normal use.
+
 Licensing
 ---------
 

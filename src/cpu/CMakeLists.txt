@@ -36,6 +36,10 @@ add_library(cpu OBJECT
     i8080.c
 )
 
+if(TERMINAL)
+    target_compile_definitions(cpu PRIVATE USE_TERMINAL_UI)
+endif()
+
 if(AMD_K5)
     target_compile_definitions(cpu PRIVATE USE_AMD_K5)
 
