@@ -4,3 +4,4 @@
 [submodule "submodules/tigt"]
 	path = submodules/tigt
 	url = git@github.com:sbooks-org/tigt.git
+	branch = master
