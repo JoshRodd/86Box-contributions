@@ -110,6 +110,14 @@ This native audio dependency remains necessary without Qt. When changing an
 existing build's OpenAL selection, clear its cached discovery results with
 `-U 'OPENAL_*'` on the configure command.
 
+For bitmap graphics, leave `TIGT_PRESENTATION` unset and select
+`TIGT_GRAPHICS=auto|blocks|sixel|ascii|iterm2` (default: `auto`). Explicit selections
+do not silently fall back. ASCII rendering requires configuring the build with
+`-DTIGT_WITH_LIBCACA=ON` and installing libcaca. Text-mode screens remain text;
+run a guest program that enters a graphics mode to see ASCII conversion.
+The `iterm2` option sends PNG images using the iTerm2 inline image protocol and
+requires a supporting terminal; auto-detection does not select it.
+
 For text-stream presentation, set `TIGT_PRESENTATION=glass` to stream
 glass-TTY output to stdout (including redirected output), `adaptive` for one-way
 full-screen fallback, or `adaptive-reversible` to return when representable

@@ -719,7 +719,21 @@ terminal_renderer_init(void)
     terminal_keyboard = terminal_keyboard_create();
     if (terminal_keyboard == NULL)
         fatal("Terminal: could not create keyboard mapper\n");
-    const tigt_config config = { TIGT_ABI_VERSION, terminal_input, NULL };
+    uint32_t graphics_mode = TIGT_GRAPHICS_AUTO;
+    const char *graphics = getenv("TIGT_GRAPHICS");
+    if (graphics && *graphics) {
+        if (!strcmp(graphics, "ascii"))
+            graphics_mode = TIGT_GRAPHICS_ASCII;
+        else if (!strcmp(graphics, "sixel"))
+            graphics_mode = TIGT_GRAPHICS_SIXEL;
+        else if (!strcmp(graphics, "iterm2"))
+            graphics_mode = TIGT_GRAPHICS_ITERM2;
+        else if (!strcmp(graphics, "blocks"))
+            graphics_mode = TIGT_GRAPHICS_BLOCKS;
+        else if (strcmp(graphics, "auto"))
+            fatal("Terminal: invalid TIGT_GRAPHICS\n");
+    }
+    const tigt_config config = { TIGT_ABI_VERSION, terminal_input, NULL, graphics_mode };
     const int result = tigt_init(&config);
     if (result != TIGT_OK) {
         pc_xt_keyboard_v1_destroy(terminal_keyboard);
