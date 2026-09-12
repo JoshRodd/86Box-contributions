@@ -82,8 +82,8 @@ mapper without Qt or SDL. It requires CMake 3.20 or newer, Ninja, C11 and C++17
 compilers, Rust/Cargo with Rust 2024 edition support, and development packages for
 curses (such as ncurses), OpenAL, FreeType, libpng, libsndfile, and libslirp
 (including its GLib dependencies). Install pkg-config so CMake can discover the
-native libraries. Initialize the repository submodules, including `submodules/tigt`
-and `submodules/terminal-to-pc-keyboard`, before configuring.
+native libraries. Initialize `submodules/tigt` before configuring. Its bundled
+keyboard mapper is enabled automatically; no separate keyboard submodule is needed.
 
 ```sh
 git submodule update --init --recursive
