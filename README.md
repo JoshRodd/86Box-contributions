@@ -75,6 +75,122 @@ Building
 ---------
 For instructions on how to build 86Box from source, see the [build guide](https://86box.readthedocs.io/en/latest/dev/buildguide.html).
 
+### Terminal-only build (Unix)
+
+The `terminal` preset builds the native tigt terminal frontend and C/Rust keyboard
+mapper without Qt or SDL. It requires CMake 3.20 or newer, Ninja, C11 and C++17
+compilers, Rust/Cargo with Rust 2024 edition support, and development packages for
+curses (such as ncurses), OpenAL, FreeType, libpng, libsndfile, and libslirp
+(including its GLib dependencies). Install pkg-config so CMake can discover the
+native libraries. Initialize the repository submodules, including `submodules/tigt`
+and `submodules/terminal-to-pc-keyboard`, before configuring.
+
+```sh
+git submodule update --init --recursive
+cmake --preset terminal
+cmake --build --preset terminal
+```
+
+The executable is `work/build-terminal-only/src/86Box`, including on macOS; it is
+not an application bundle. OpenAL remains enabled for floppy audio. The preset
+disables optional external synthesizers, MIDI, Discord, VNC, GUI rendering
+integrations, tests, and benchmarks, without changing the GUI presets. Native
+libraries outside the system search paths can be supplied through
+`CMAKE_PREFIX_PATH` and `PKG_CONFIG_PATH`; no Qt or Homebrew-specific paths are
+required by this preset.
+
+On macOS with Homebrew, select OpenAL Soft rather than Apple's legacy OpenAL
+framework:
+
+```sh
+cmake --preset terminal -DOpenAL_ROOT="$(brew --prefix openal-soft)"
+```
+
+This native audio dependency remains necessary without Qt. When changing an
+existing build's OpenAL selection, clear its cached discovery results with
+`-U 'OPENAL_*'` on the configure command.
+
+For bitmap graphics, leave `TIGT_PRESENTATION` unset and select
+`TIGT_GRAPHICS=auto|blocks|sixel|ascii|iterm2` (default: `auto`). Explicit selections
+do not silently fall back. ASCII rendering requires configuring the build with
+`-DTIGT_WITH_LIBCACA=ON` and installing libcaca. Text-mode screens remain text;
+run a guest program that enters a graphics mode to see ASCII conversion.
+The `iterm2` option sends PNG images using the iTerm2 inline image protocol and
+requires a supporting terminal; auto-detection does not select it.
+
+For text-stream presentation, set `TIGT_PRESENTATION=glass` to stream
+glass-TTY output to stdout (including redirected output), `adaptive` for one-way
+full-screen fallback, or `adaptive-reversible` to return when representable
+sequential output resumes. A forward row boundary and new text (or an observed
+clear and new text) must settle for 100 ms with the cursor at the text frontier.
+Recovery continues at the retained cursor without clearing or replaying history;
+it does not require `CLS`. Adaptive modes require stdout to be a TTY, use the normal
+screen rather than the alternate screen, and clip to smaller host windows. The
+fallback region starts at the current host cursor row (the following row if a
+line is partly occupied), scrolling only height that would overflow the window.
+The frontend obtains a fresh host cursor position through a DSR exchange when
+needed, separating terminal replies from user input; a pending cursor request
+does not itself mean full-screen presentation has started.
+Cursor-relative fallback requires stdin to be the output terminal and a cursor
+report within one second; failure is explicit rather than guessing an origin.
+Glass presentation reads stdin in normal cooked mode: the host terminal handles
+line editing and delivers each completed line to the guest at a paced rate.
+Host canonical editing and echo remain enabled. When stdin and stdout refer to
+the same echoing TTY, each finalized, decoded line is recorded as already
+displayed before any of its keys reach the guest. Cooked edits are folded into
+that line; matching guest echo, including newlines and automatic guest wraps,
+is accounted for without printing a second copy. This bounded accounting is
+distinct from speculative output notifications: overflow or a mismatch fails
+representability rather than replaying already-displayed echo. No local echo is
+registered for piped input or input from a different terminal.
+Actual adaptive full-screen fallback switches stdin to raw keyboard input,
+preserving unread cooked text; `adaptive-reversible` restores cooked input when
+presentation returns to glass. Input polling and DSR handling are synchronous
+and preserve shared-descriptor state. The tigt presenter itself remains
+output-only and never reads stdin or changes terminal input modes.
+Raw mode delivers Ctrl-C and Ctrl-Z to the guest; Ctrl-] exits the emulator.
+In cooked mode Ctrl-C exits and Ctrl-Z suspends through the normal host terminal
+signals. Suspend and exit restore the original terminal settings and release
+guest keys. Piped stdin is accepted without changing terminal modes; EOF stops
+input after queued bytes are delivered, without stopping the guest. Input is
+held while emulation is paused. Unset the variable for the existing interactive
+curses frontend. An unrepresentable glass-TTY update is confirmed for 100 ms
+before the frontend reports failure; adaptive modes instead fall back to
+full-screen presentation. Use `--logfile` to keep emulator logs separate from
+the guest stdout stream.
+
+Upward scrolling is recognized by retained row alignment, including shifts of
+more than one row between snapshots. A partially copied row, moved prefix with
+an untouched (possibly already shifted) suffix, or uncleared exposed rows keeps
+the last coherent image, cursor and local echo in both glass and full-screen
+presentation. Coherent completion is committed once without replaying retained
+rows. This scroll hold has a 500 ms deadline from first detection: progressing
+or identical torn frames do not extend it. Ambiguous repeated rows cannot prove
+a shift; expired or unrelated updates take the ordinary failure/fallback policy.
+
+Hardware-disabled text output holds the previous image for 200 ms (12 CGA/PCjr
+frames at 60 Hz or 10 MDA frames at 50 Hz), without changing cooked/raw input mode.
+Any observed change anywhere in the raw video-memory aperture, including
+attributes or off-screen bytes, cancels that ordinary hold and shows hardware
+black for the rest of the disable interval. The exception is recognized scrolling:
+an unfinished copy, or a completed copy while video is still disabled, retains
+the last coherent presentation under the same bounded 500 ms scroll deadline.
+Underlying text is decoded for this analysis but never painted while disabled.
+Unrelated disabled-memory changes still blank immediately. Reenabling video
+takes effect when its frame is coherent. Ordinary enabled blanks such as `CLS`
+are not delayed. The hardware-disable and scroll holds are separate from the
+100 ms adaptive confirmation and recovery intervals.
+
+For opt-in boot diagnostics in a terminal build, set `86BOX_BOOT_TRACE` to a
+new file path. An existing file is never overwritten; failure to create the
+trace stops the emulator. The JSONL stream combines ordered, host-timestamped
+CGA/MDA/PCjr text-memory snapshots with INT 10h and INT 21h entry observations
+from either 8088/8086 CPU core. Interrupt records include registers, BIOS video
+state, and bounded output-buffer captures where applicable. Tracing does not
+modify guest registers or memory, but synchronous writes add host overhead and
+frame snapshots can produce large files containing guest data. Leave the
+variable unset for normal use.
+
 Licensing
 ---------
 

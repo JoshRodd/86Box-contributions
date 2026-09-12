@@ -93,7 +93,7 @@
 #include <86box/version.h>
 #include <86box/plat_floppy_ioctl.h>
 
-#ifndef USE_SDL_UI
+#if !defined(USE_SDL_UI) && !defined(USE_TERMINAL_UI)
 /* Deliberate to not make the 86box.h header kitchen-sink. */
 #include <86box/qt_glsl.h>
 extern char gl3_shader_file[MAX_USER_SHADERS][512];
@@ -2592,7 +2592,7 @@ load_other_peripherals(void)
         ini_section_delete_var(cat, temp);
 }
 
-#ifndef USE_SDL_UI
+#if !defined(USE_SDL_UI) && !defined(USE_TERMINAL_UI)
 /* Load OpenGL 3.0 renderer options. */
 static void
 load_gl3_shaders(void)
@@ -2841,7 +2841,7 @@ config_load(void)
         load_floppy_and_cdrom_drives(); /* Floppy and CD-ROM drives */
         load_other_removable_devices(); /* Other removable devices */
         load_other_peripherals();       /* Other peripherals */
-#ifndef USE_SDL_UI
+#if !defined(USE_SDL_UI) && !defined(USE_TERMINAL_UI)
         load_gl3_shaders();             /* GL3 Shaders */
         load_vk_shaders();              /* VK Shaders */
 #endif
@@ -4024,7 +4024,7 @@ save_other_peripherals(void)
     ini_delete_section_if_empty(config, cat);
 }
 
-#ifndef USE_SDL_UI
+#if !defined(USE_SDL_UI) && !defined(USE_TERMINAL_UI)
 /* Save "GL3 Shaders" section. */
 static void
 save_gl3_shaders(void)
@@ -4584,7 +4584,7 @@ config_save(void)
     save_floppy_and_cdrom_drives(); /* Floppy and CD-ROM drives */
     save_other_removable_devices(); /* Other removable devices */
     save_other_peripherals();       /* Other peripherals */
-#ifndef USE_SDL_UI
+#if !defined(USE_SDL_UI) && !defined(USE_TERMINAL_UI)
     save_gl3_shaders();             /* GL3 Shaders */
     save_vk_shaders();              /* GL3 Shaders */
 #endif
