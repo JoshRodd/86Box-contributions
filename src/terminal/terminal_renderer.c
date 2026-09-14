@@ -3,17 +3,10 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <signal.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/stat.h>
-#include <termios.h>
-/* POSIX carriage-return delay name conflicts with the CPU register member
-   in translation units embedding this adapter alongside a video device. */
-#ifdef CR0
-#undef CR0
-#endif
 #include <unistd.h>
 #include <string.h>
 #include <time.h>
@@ -26,6 +19,7 @@
 #include <tigt.h>
 #include <tigt_keyboard.h>
 #include <tigt_presenter.h>
+#include <tigt_terminal.h>
 #include <tigt_video.h>
 #include "terminal_renderer.h"
 
@@ -33,7 +27,8 @@
 static void *terminal_keyboard;
 static uint16_t terminal_print_screen_key, terminal_pause_key;
 static bool terminal_initialized;
-static bool terminal_suspended;
+static unsigned terminal_generation;
+static int terminal_input_error;
 static tigt_presenter *terminal_presenter;
 static tigt_video *terminal_text_decoders[MONITORS_NUM][2];
 
@@ -48,12 +43,14 @@ static struct {
 
 /* Presenter input shares the emulation thread; curses owns its own decoder. */
 static tigt_input *terminal_stdin_decoder;
-static struct termios terminal_saved_input;
-static bool terminal_input_saved, terminal_input_tty, terminal_input_active;
-static bool terminal_input_fullscreen, terminal_input_protocol, terminal_input_eof;
+static bool terminal_input_available, terminal_input_tty, terminal_input_active;
+static bool terminal_input_fullscreen, terminal_input_eof;
 /* Space for a paced cooked line plus input received during a cursor query. */
 static uint8_t terminal_input_bytes[8192];
 static size_t terminal_input_offset, terminal_input_length, terminal_input_cooked;
+/* Kernel-processed bytes must retain their quoting across a raw cutover. */
+static size_t terminal_input_host_processed;
+static bool terminal_input_kernel_processed;
 static uint64_t terminal_input_deadline, terminal_input_last_byte;
 static unsigned terminal_input_events;
 static bool terminal_input_echo_tty, terminal_input_baseline;
@@ -243,24 +240,14 @@ static void
 terminal_input(const tigt_input_event *event, void *user)
 {
     (void) user;
-    if (!terminal_presenter &&
-        (event->kind == TIGT_PRESS || event->kind == TIGT_REPEAT) &&
-        (event->modifiers & TIGT_MOD_CONTROL) && event->key.kind == TIGT_KEY_CHAR) {
-        if (event->key.character == 'c' || event->key.character == 'C') {
-            kill(getpid(), SIGINT);
+    /* Native sessions apply host policy before invoking their callback.
+       Canonical/probe bytes have already passed the kernel's ISIG/VLNEXT. */
+    if (terminal_presenter && terminal_input_tty && !terminal_input_kernel_processed) {
+        const int forward = tigt_terminal_filter_input(event);
+        if (forward < 0)
+            terminal_input_error = forward;
+        if (forward <= 0)
             return;
-        }
-        if (event->key.character == 'z' || event->key.character == 'Z') {
-            kill(getpid(), SIGTSTP);
-            return;
-        }
-    }
-    if (terminal_presenter && terminal_input_fullscreen && terminal_input_tty &&
-        event->kind == TIGT_PRESS &&
-        (event->modifiers & TIGT_MOD_CONTROL) &&
-        event->key.kind == TIGT_KEY_CHAR && event->key.character == ']') {
-        kill(getpid(), SIGINT);
-        return;
     }
     if (terminal_presenter && event->kind != TIGT_RELEASE)
         terminal_input_events++;
@@ -302,13 +289,9 @@ terminal_stdin_restore(void)
     terminal_cursor_query = TERMINAL_CURSOR_IDLE;
     terminal_cursor_mode = false;
     terminal_cursor_length = 0;
-    if (terminal_input_protocol) {
-        terminal_input_sequence("\033[<u");
-        terminal_input_protocol = false;
-    }
-    if (terminal_input_saved && terminal_input_tty)
-        while (tcsetattr(STDIN_FILENO, TCSANOW, &terminal_saved_input) < 0 &&
-               errno == EINTR) {}
+    const int result = tigt_terminal_disable_input();
+    if (result < 0)
+        terminal_input_error = result;
     terminal_input_active = false;
 }
 
@@ -336,7 +319,7 @@ terminal_stdin_create(void)
 static void
 terminal_stdin_mode(bool fullscreen)
 {
-    if (!terminal_input_saved || terminal_input_eof)
+    if (!terminal_input_available || terminal_input_eof || !tigt_terminal_is_foreground())
         return;
     if (terminal_input_active && terminal_input_fullscreen == fullscreen && !terminal_cursor_mode)
         return;
@@ -345,36 +328,15 @@ terminal_stdin_mode(bool fullscreen)
         terminal_stdin_release();
         terminal_stdin_create();
     }
-    if (terminal_input_protocol) {
-        terminal_input_sequence("\033[<u");
-        terminal_input_protocol = false;
-    }
-    if (terminal_input_tty) {
-        struct termios mode = terminal_saved_input;
-        if (fullscreen) {
-            mode.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
-            mode.c_cflag = (mode.c_cflag & ~(CSIZE | PARENB)) | CS8;
-            mode.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-            mode.c_cc[VMIN] = 1;
-            mode.c_cc[VTIME] = 0;
-        } else {
-            mode.c_iflag |= ICRNL;
-            mode.c_iflag &= ~(IGNCR | INLCR);
-            mode.c_lflag |= ICANON | ECHO | ECHOE | ECHOK | ISIG | IEXTEN;
-        }
-        /* Preserve output processing: stdin and stdout often share this TTY,
-           and the presenter writes LF expecting the shell's ONLCR behavior. */
-        int result;
-        do {
-            result = tcsetattr(STDIN_FILENO, TCSANOW, &mode);
-        } while (result < 0 && errno == EINTR);
-        if (result < 0)
-            fatal("Terminal: could not change stdin mode: %s\n", strerror(errno));
-    }
+    int result = tigt_terminal_set_probe_mode(0);
+    if (result == TIGT_OK)
+        result = tigt_terminal_set_input_mode(fullscreen, fullscreen);
+    if (result < 0)
+        fatal("Terminal: could not change stdin mode (%d)\n", result);
     /* Never change file-status flags: stdin/stdout can be dup()s of one open
        description, so O_NONBLOCK here would also make presenter writes fail
        under output backpressure. This thread is the sole reader; poll before
-       each bounded read, with VMIN=1/VTIME=0 in raw mode, avoids waiting. */
+       each bounded read. TIGT's noncanonical mode may return an empty read. */
     terminal_input_fullscreen = fullscreen;
     terminal_input_active = true;
     terminal_cursor_mode = false;
@@ -382,10 +344,6 @@ terminal_stdin_mode(bool fullscreen)
     if (!fullscreen)
         tigt_presenter_forget_cursor(terminal_presenter);
     terminal_input_deadline = terminal_input_last_byte = 0;
-    if (fullscreen && terminal_input_tty && isatty(STDOUT_FILENO)) {
-        terminal_input_sequence("\033[>u\033[=11;1u");
-        terminal_input_protocol = true;
-    }
 }
 
 /* The kernel has already edited and echoed these bytes. Register the complete
@@ -432,22 +390,25 @@ terminal_stdin_local_echo(const uint8_t *bytes, size_t length)
         fatal("Terminal: could not account for cooked echo (%d)\n", result);
 }
 
-static bool
+static int
 terminal_stdin_readable(void)
 {
     struct pollfd input = { .fd = STDIN_FILENO, .events = POLLIN };
-    return poll(&input, 1, 0) > 0 &&
-           (input.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL));
+    return poll(&input, 1, 0) > 0 ?
+           input.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL) : 0;
 }
 
-static void
+static bool
 terminal_stdin_read(bool cooked)
 {
     size_t capacity = sizeof(terminal_input_bytes) - terminal_input_length;
     if (capacity > TIGT_PRESENTER_LOCAL_ECHO_MAX)
         capacity = TIGT_PRESENTER_LOCAL_ECHO_MAX;
-    if (!capacity || !terminal_stdin_readable())
-        return;
+    if (!capacity)
+        return false;
+    const int ready = terminal_stdin_readable();
+    if (!ready)
+        return false;
     uint8_t *bytes = terminal_input_bytes + terminal_input_length;
     const ssize_t count = read(STDIN_FILENO, bytes, capacity);
     if (count > 0) {
@@ -456,14 +417,24 @@ terminal_stdin_read(bool cooked)
         terminal_input_length += (size_t) count;
         if (cooked)
             terminal_input_cooked = terminal_input_length;
-    } else if (count == 0 || (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK))
+        if (terminal_input_tty && cooked)
+            terminal_input_host_processed = terminal_input_length;
+        return true;
+    }
+    /* VMIN=0 means no data, not EOF, in raw/probe mode. Canonical Ctrl-D,
+       stream EOF and a real terminal hangup still finish input normally. */
+    if ((count == 0 && (!terminal_input_tty ||
+                       (!terminal_input_fullscreen && !terminal_cursor_mode) ||
+                       (ready & POLLHUP))) ||
+        (count < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK))
         terminal_input_eof = true;
+    return false;
 }
 
 static void
 terminal_cursor_request(void)
 {
-    if (terminal_cursor_query != TERMINAL_CURSOR_IDLE)
+    if (terminal_cursor_query != TERMINAL_CURSOR_IDLE || !tigt_terminal_is_foreground())
         return;
     if (!terminal_input_active || terminal_input_eof || !terminal_input_echo_tty)
         fatal("Terminal: adaptive output needs a cursor reply on the output TTY\n");
@@ -474,6 +445,8 @@ terminal_cursor_request(void)
                 terminal_input_length - terminal_input_offset);
         terminal_input_cooked = terminal_input_cooked > terminal_input_offset ?
                                 terminal_input_cooked - terminal_input_offset : 0;
+        terminal_input_host_processed = terminal_input_host_processed > terminal_input_offset ?
+                                        terminal_input_host_processed - terminal_input_offset : 0;
         terminal_input_length -= terminal_input_offset;
         terminal_input_offset = 0;
     }
@@ -483,7 +456,8 @@ terminal_cursor_request(void)
         if (sizeof(terminal_input_bytes) - terminal_input_length <
             TIGT_PRESENTER_LOCAL_ECHO_MAX + 256)
             return;
-        terminal_stdin_read(true);
+        if (!terminal_stdin_read(true))
+            break;
     }
     if (terminal_input_eof) {
         terminal_stdin_restore();
@@ -492,20 +466,11 @@ terminal_cursor_request(void)
     if (sizeof(terminal_input_bytes) - terminal_input_length <
         TIGT_PRESENTER_LOCAL_ECHO_MAX + 256)
         return; /* Retry at a later vsync after the guest drains the line. */
-    struct termios mode;
-    if (tcgetattr(STDIN_FILENO, &mode) < 0)
-        fatal("Terminal: could not prepare cursor query: %s\n", strerror(errno));
-    /* ISIG and the shell's output processing remain in effect during DSR.
-       TCSANOW, never TCSAFLUSH: changing ICANON exposes its unfinished line. */
-    mode.c_lflag &= ~(ICANON | ECHO | ECHONL);
-    mode.c_cc[VMIN] = 1;
-    mode.c_cc[VTIME] = 0;
-    int result;
-    do {
-        result = tcsetattr(STDIN_FILENO, TCSANOW, &mode);
-    } while (result < 0 && errno == EINTR);
+    /* TIGT keeps kernel ISIG/VLNEXT policy for a cooked cursor probe, exposing
+       its unfinished line without flushing or changing shared fd flags. */
+    const int result = tigt_terminal_set_probe_mode(1);
     if (result < 0)
-        fatal("Terminal: could not query cursor: %s\n", strerror(errno));
+        fatal("Terminal: could not query cursor (%d)\n", result);
     terminal_cursor_mode = true;
     /* Everything queued before the query belongs to the previous input mode,
        including a host-edited partial line that canonical poll could not see. */
@@ -515,7 +480,8 @@ terminal_cursor_request(void)
             fatal("Terminal: pending input exceeds cursor query capacity\n");
             return;
         }
-        terminal_stdin_read(!terminal_input_fullscreen);
+        if (!terminal_stdin_read(!terminal_input_fullscreen))
+            break;
     }
     if (terminal_input_eof) {
         terminal_stdin_restore();
@@ -602,7 +568,10 @@ terminal_cursor_poll(void)
        This also bounds input while paused without making the shared fd raw. */
     size_t capacity = sizeof(terminal_input_bytes) - terminal_input_length -
                       terminal_cursor_length;
-    if (!capacity || !terminal_stdin_readable())
+    if (!capacity)
+        return;
+    const int ready = terminal_stdin_readable();
+    if (!ready)
         return;
     uint8_t bytes[256];
     if (capacity > sizeof(bytes))
@@ -615,45 +584,93 @@ terminal_cursor_poll(void)
             else
                 terminal_input_bytes[terminal_input_length++] = bytes[i];
         }
-    } else if (count == 0 || (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)) {
+        if (terminal_input_tty && !terminal_input_fullscreen)
+            terminal_input_host_processed = terminal_input_length;
+    } else if ((count == 0 && (!terminal_input_tty || (ready & POLLHUP))) ||
+               (count < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)) {
         terminal_stdin_restore();
         fatal("Terminal: input ended while awaiting host cursor\n");
     }
 }
 
-void
+static int
+terminal_renderer_poll_lifecycle(void)
+{
+    const int result = tigt_terminal_poll();
+    const unsigned generation = tigt_terminal_generation();
+    const bool output_changed = generation != terminal_generation;
+    if (terminal_initialized &&
+        (output_changed || (result >= 0 && (result & TIGT_TERMINAL_INPUT_RESET)))) {
+        terminal_generation = generation;
+        terminal_stdin_release();
+        terminal_cursor_query = TERMINAL_CURSOR_IDLE;
+        terminal_cursor_mode = false;
+        terminal_cursor_length = 0;
+        terminal_input_active = false;
+        if (terminal_presenter && output_changed)
+            tigt_presenter_forget_cursor(terminal_presenter);
+    }
+    if (result < 0)
+        return result;
+    if (terminal_initialized && (result & TIGT_TERMINAL_RESTORED)) {
+        if (terminal_presenter) {
+            if (terminal_input_available && !terminal_input_eof) {
+                if (!terminal_stdin_decoder)
+                    terminal_stdin_create();
+                terminal_stdin_mode(terminal_input_fullscreen);
+            }
+        } else if (!terminal_keyboard) {
+            terminal_keyboard = terminal_keyboard_create();
+            if (!terminal_keyboard)
+                fatal("Terminal: could not recreate keyboard mapper\n");
+        }
+    }
+    return terminal_input_error;
+}
+
+int
 terminal_renderer_poll_input(void)
 {
-    if (!terminal_presenter || terminal_suspended || !terminal_input_active)
-        return;
+    const int result = terminal_renderer_poll_lifecycle();
+    if (result < 0)
+        return result;
+    if (!terminal_presenter || !terminal_input_active || !tigt_terminal_is_foreground())
+        return TIGT_OK;
     if (terminal_cursor_query == TERMINAL_CURSOR_WAITING)
         terminal_cursor_poll();
     if (terminal_cursor_query != TERMINAL_CURSOR_IDLE)
-        return; /* Resubmit the video frame before delivering collected keys. */
+        return TIGT_OK; /* Resubmit the video frame before delivering collected keys. */
     if (terminal_input_offset == terminal_input_length && !terminal_input_eof) {
         terminal_input_offset = terminal_input_length = terminal_input_cooked = 0;
+        terminal_input_host_processed = 0;
         terminal_stdin_read(!terminal_input_fullscreen && terminal_input_tty);
     }
     /* Reading remains live while paused, but never fill the guest BIOS queue
        while the guest cannot drain it. The fixed buffer backpressures pipes. */
     if (dopause || (!terminal_input_baseline && terminal_input_echo_tty &&
                     terminal_input_offset < terminal_input_cooked))
-        return;
+        return TIGT_OK;
     const uint64_t now = terminal_input_clock();
     if (now < terminal_input_deadline)
-        return;
+        return TIGT_OK;
     const unsigned before = terminal_input_events;
     while (terminal_input_offset < terminal_input_length) {
         const bool paced = terminal_input_offset < terminal_input_cooked ||
                            !terminal_input_fullscreen || !terminal_input_tty;
+        terminal_input_kernel_processed =
+            terminal_input_offset < terminal_input_host_processed;
         tigt_input_feed(terminal_stdin_decoder,
                         terminal_input_bytes + terminal_input_offset++, 1);
+        if (terminal_input_error < 0)
+            return terminal_input_error;
+        if (terminal_generation != tigt_terminal_generation())
+            return TIGT_OK; /* Release guest state before another logical key. */
         terminal_input_last_byte = now;
         if (paced && terminal_input_events != before) {
             /* Fifty keys/second leaves XT IRQ1 and the DOS line reader time
                to consume each key instead of overflowing their small queues. */
             terminal_input_deadline = now + 20000000ULL;
-            return;
+            return TIGT_OK;
         }
     }
     if (terminal_input_eof ||
@@ -665,6 +682,7 @@ terminal_renderer_poll_input(void)
         terminal_stdin_restore();
         terminal_stdin_release();
     }
+    return terminal_input_error;
 }
 
 void
@@ -674,8 +692,11 @@ terminal_renderer_init(void)
     if (terminal_initialized)
         return;
     terminal_video_memory.aperture = 0;
+    terminal_input_error = TIGT_OK;
     const char *presentation = getenv("TIGT_PRESENTATION");
     if (presentation && *presentation) {
+        if (tigt_terminal_capture(STDIN_FILENO, STDOUT_FILENO) != TIGT_OK)
+            fatal("Terminal: could not capture terminal ownership\n");
         const bool glass = !strcmp(presentation, "glass");
         const bool reversible = !strcmp(presentation, "adaptive-reversible");
         if (!glass && !reversible && strcmp(presentation, "adaptive"))
@@ -689,7 +710,7 @@ terminal_renderer_init(void)
         if (result != TIGT_OK)
             fatal("Terminal: presentation initialization failed (%d)\n", result);
         terminal_initialized = true;
-        terminal_suspended = false;
+        terminal_generation = tigt_terminal_generation();
         atexit(terminal_renderer_close);
         terminal_input_tty = isatty(STDIN_FILENO);
         struct stat input_stat, output_stat;
@@ -697,18 +718,16 @@ terminal_renderer_init(void)
                                   fstat(STDIN_FILENO, &input_stat) == 0 &&
                                   fstat(STDOUT_FILENO, &output_stat) == 0 &&
                                   input_stat.st_rdev == output_stat.st_rdev;
-        terminal_input_saved = fcntl(STDIN_FILENO, F_GETFL) >= 0;
+        terminal_input_available = fcntl(STDIN_FILENO, F_GETFL) >= 0;
         terminal_input_eof = false;
+        terminal_input_fullscreen = false;
         terminal_input_baseline = false;
         terminal_input_offset = terminal_input_length = terminal_input_cooked = 0;
+        terminal_input_host_processed = 0;
+        terminal_input_kernel_processed = false;
         terminal_cursor_query = TERMINAL_CURSOR_IDLE;
         terminal_cursor_mode = false;
-        if (terminal_input_saved && terminal_input_tty &&
-            tcgetattr(STDIN_FILENO, &terminal_saved_input) < 0) {
-            terminal_input_saved = false;
-            fatal("Terminal: could not save stdin mode: %s\n", strerror(errno));
-        }
-        if (terminal_input_saved) {
+        if (terminal_input_available) {
             terminal_stdin_create();
             terminal_stdin_mode(false);
         }
@@ -741,51 +760,10 @@ terminal_renderer_init(void)
         fatal("Terminal: tigt initialization failed (%d)\n", result);
     }
     terminal_initialized = true;
-    terminal_suspended = false;
+    terminal_generation = tigt_terminal_generation();
     atexit(terminal_renderer_close);
 }
 
-void
-terminal_renderer_suspend(void)
-{
-    if (!terminal_initialized || terminal_suspended)
-        return;
-    if (terminal_presenter) {
-        terminal_stdin_restore();
-        terminal_stdin_release();
-        tigt_presenter_forget_cursor(terminal_presenter);
-        terminal_suspended = true;
-        return;
-    }
-    tigt_suspend();
-    keyboard_all_up();
-    pc_xt_keyboard_v1_destroy(terminal_keyboard);
-    terminal_keyboard = NULL;
-    terminal_suspended = true;
-}
-
-void
-terminal_renderer_resume(void)
-{
-    if (!terminal_initialized || !terminal_suspended)
-        return;
-    if (terminal_presenter) {
-        if (terminal_input_saved && !terminal_input_eof) {
-            terminal_stdin_create();
-            terminal_stdin_mode(terminal_input_fullscreen);
-        }
-        terminal_suspended = false;
-        tigt_presenter_forget_cursor(terminal_presenter);
-        return;
-    }
-    terminal_keyboard = terminal_keyboard_create();
-    if (terminal_keyboard == NULL)
-        fatal("Terminal: could not recreate keyboard mapper\n");
-    const int result = tigt_resume();
-    if (result != TIGT_OK)
-        fatal("Terminal: tigt resume failed (%d)\n", result);
-    terminal_suspended = false;
-}
 
 void
 terminal_renderer_close(void)
@@ -793,10 +771,12 @@ terminal_renderer_close(void)
     if (!terminal_initialized)
         return;
     if (terminal_presenter) {
-        terminal_stdin_restore();
+        tigt_terminal_release();
+        terminal_input_active = false;
         terminal_stdin_release();
-        terminal_input_saved = false;
+        terminal_input_available = false;
         tigt_presenter_destroy(terminal_presenter);
+        tigt_terminal_forget();
         terminal_video_memory.aperture = 0;
         for (unsigned m = 0; m < MONITORS_NUM; m++)
             for (unsigned kind = 0; kind < 2; kind++) {
@@ -804,7 +784,7 @@ terminal_renderer_close(void)
                 terminal_text_decoders[m][kind] = NULL;
             }
         terminal_presenter = NULL;
-        terminal_initialized = terminal_suspended = false;
+        terminal_initialized = false;
         return;
     }
     tigt_shutdown();
@@ -812,7 +792,6 @@ terminal_renderer_close(void)
     pc_xt_keyboard_v1_destroy(terminal_keyboard);
     terminal_keyboard = NULL;
     terminal_initialized = false;
-    terminal_suspended = false;
 }
 
 void
@@ -861,8 +840,11 @@ terminal_video_snapshot(const uint8_t *vram, const uint8_t *crtc,
                          uint8_t mode, int monochrome, const uint8_t *pcjr_array)
 {
     boot_trace_frame(vram, crtc, mode, monochrome);
-    if (!terminal_presenter || terminal_suspended || !crtc[1] || !crtc[6])
+    if (!terminal_presenter || !crtc[1] || !crtc[6])
         return;
+    const int lifecycle = terminal_renderer_poll_lifecycle();
+    if (lifecycle < 0)
+        fatal("Terminal: lifecycle failed (%d)\n", lifecycle);
     if (!monochrome && (mode & 2))
         return; /* This output-only integration handles text modes. */
     if (terminal_cursor_query == TERMINAL_CURSOR_WAITING)
@@ -967,12 +949,20 @@ terminal_video_blit(int x, int y, int width, int height, int monitor_index)
 {
     terminal_video_frame *frame = &terminal_frames[monitor_index];
     const monitor_t *monitor = &monitors[monitor_index];
-    if (terminal_suspended || terminal_presenter)
+    if (!terminal_initialized)
         return;
-    (void) tigt_set_display_technology(
-        monitor->mon_vid_type == VIDEO_FLAG_TYPE_MDA ?
-            TIGT_DISPLAY_MDA : TIGT_DISPLAY_GENERIC);
-    (void) tigt_set_overscan(&frame->overscan);
+    if (terminal_presenter && ((frame->columns && frame->rows) ||
+                               tigt_terminal_is_foreground()))
+        return; /* Foreground presenter support remains text-only. */
+    const int lifecycle = terminal_renderer_poll_lifecycle();
+    if (lifecycle < 0)
+        fatal("Terminal: lifecycle failed (%d)\n", lifecycle);
+    if (!terminal_presenter) {
+        (void) tigt_set_display_technology(
+            monitor->mon_vid_type == VIDEO_FLAG_TYPE_MDA ?
+                TIGT_DISPLAY_MDA : TIGT_DISPLAY_GENERIC);
+        (void) tigt_set_overscan(&frame->overscan);
+    }
     if (frame->columns && frame->rows) {
         for (uint16_t row = 0; row < frame->rows; row++) {
             for (uint16_t column = 0; column < frame->columns; column++) {
@@ -981,8 +971,10 @@ terminal_video_blit(int x, int y, int width, int height, int monitor_index)
                     frame->cells[index] = (tigt_text_cell) { ' ', 0, 0, 0 };
             }
         }
-        (void) tigt_present_text(frame->cells, frame->columns, frame->rows,
-                                 TERMINAL_TEXT_COLUMNS);
+        const int result = tigt_present_text(frame->cells, frame->columns, frame->rows,
+                                             TERMINAL_TEXT_COLUMNS);
+        if (result < 0)
+            fatal("Terminal: text presentation failed (%d)\n", result);
         return;
     }
 
@@ -1008,6 +1000,12 @@ terminal_video_blit(int x, int y, int width, int height, int monitor_index)
         x > buffer->w - width || y > buffer->h - 200 * line_scale ||
         buffer->w > UINT16_MAX / line_scale)
         return;
-    (void) tigt_present_bitmap(buffer->line[y] + x, width, 200,
-                               buffer->w * line_scale, pixel_width);
+    if (terminal_presenter) {
+        fatal("Terminal: bitmap presentation failed (%d)\n", TIGT_ERROR_BACKGROUND);
+        return;
+    }
+    const int result = tigt_present_bitmap(buffer->line[y] + x, width, 200,
+                                           buffer->w * line_scale, pixel_width);
+    if (result < 0)
+        fatal("Terminal: bitmap presentation failed (%d)\n", result);
 }

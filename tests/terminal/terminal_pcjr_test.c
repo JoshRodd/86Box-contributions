@@ -180,6 +180,7 @@ static void coherent_video_enable(void)
 
 int main(void)
 {
+    terminal_initialized = true;
     for (unsigned y = 0; y < 432; y++)
         bitmap.line[y] = pixels[y];
     bitmap.w = 1024;

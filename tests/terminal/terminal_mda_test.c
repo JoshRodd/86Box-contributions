@@ -166,6 +166,7 @@ static void assert_enabled(void)
 
 int main(void)
 {
+    terminal_initialized = true;
     int palette_selection = 0;
     for (unsigned y = 0; y < 14; y++)
         bitmap.line[y] = pixels[y];

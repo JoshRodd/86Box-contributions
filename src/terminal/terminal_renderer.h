@@ -10,11 +10,10 @@ void terminal_boot_trace_interrupt(unsigned vector, const uint16_t regs[14],
                                    const uint8_t *ram, size_t ram_size);
 void terminal_renderer_init(void);
 void terminal_renderer_close(void);
-void terminal_renderer_suspend(void);
-void terminal_renderer_resume(void);
-/* Nonblocking presenter stdin pump; call on the presentation/emulation thread,
-   including paused iterations with no video frames. Curses polls independently. */
-void terminal_renderer_poll_input(void);
+/* Poll lifecycle notifications and the nonblocking presenter stdin pump on
+   the emulation thread, including paused iterations with no video frames.
+   Returns a TIGT error if an asynchronous terminal operation failed. */
+int terminal_renderer_poll_input(void);
 /* Native video renderers publish resolved cells while walking the beam. The
    shared blit boundary submits that frame; no VRAM or registers cross here. */
 void terminal_video_begin(void);

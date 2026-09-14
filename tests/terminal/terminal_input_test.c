@@ -8,7 +8,9 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -29,7 +31,10 @@ void fatal(const char *fmt, ...)
 {
     if (expect_cursor_timeout)
         _exit(75);
-    fputs(fmt, stderr);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
     abort();
 }
 int machine_has_bus(int m, uintptr_t flags) { (void) m; (void) flags; return 0; }
@@ -89,7 +94,7 @@ static void pump(unsigned milliseconds)
     end.tv_sec += milliseconds / 1000 + end.tv_nsec / 1000000000L;
     end.tv_nsec %= 1000000000L;
     do {
-        terminal_renderer_poll_input();
+        assert(terminal_renderer_poll_input() == TIGT_OK);
         drain_output();
         nanosleep(&pause, NULL);
         assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
@@ -192,11 +197,18 @@ static void setup(void)
     assert(master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0);
     slave = open(ptsname(master), O_RDWR | O_NOCTTY);
     assert(slave >= 0);
+    assert(ioctl(slave, TIOCSCTTY, 0) == 0);
+    assert(tcsetpgrp(slave, getpgrp()) == 0);
     struct winsize size = { .ws_col = 10, .ws_row = 6 };
     assert(ioctl(slave, TIOCSWINSZ, &size) == 0);
     assert(tcgetattr(slave, &original) == 0);
     original.c_lflag |= ICANON | ECHO | ECHOE | ISIG;
     original.c_iflag |= ICRNL | IXON;
+    original.c_lflag |= IEXTEN;
+    original.c_cc[VINTR] = 0x03;
+    original.c_cc[VQUIT] = 0x1c;
+    original.c_cc[VSUSP] = 0x1a;
+    original.c_cc[VLNEXT] = 0x16;
     original.c_cc[VERASE] = 0x7f;
     original.c_cc[VEOF] = 0x04;
     assert(tcsetattr(slave, TCSANOW, &original) == 0);
@@ -214,6 +226,8 @@ static void setup(void)
 
 static void teardown(void)
 {
+    /* Closing the last controlling PTY is teardown, not a lifecycle scenario. */
+    assert(signal(SIGHUP, SIG_IGN) != SIG_ERR);
     assert(dup2(saved_stdin, STDIN_FILENO) == STDIN_FILENO);
     assert(dup2(saved_stdout, STDOUT_FILENO) == STDOUT_FILENO);
     close(saved_stdin); close(saved_stdout); close(slave); close(master);
@@ -223,7 +237,7 @@ static void snapshot(void)
 {
     terminal_video_snapshot(vram, crtc, 8, 0, NULL);
     drain_output();
-    terminal_renderer_poll_input();
+    assert(terminal_renderer_poll_input() == TIGT_OK);
 }
 
 static void blank_frame(void)
@@ -459,7 +473,9 @@ static void cursor_handshake(void)
     snapshot();
     check_mode(1);
     const size_t before = press_count;
-    const char editing[] = { 'a', 'b', 0x7f, 'c' };
+    /* The quoted Ctrl-C must retain its kernel-processed provenance when the
+       unfinished canonical line is exposed by DSR and later decoded raw. */
+    const char editing[] = { 'a', 'b', 0x7f, 'c', 0x16, 0x03 };
     send_bytes(editing, sizeof(editing)); /* No LF: invisible to canonical poll. */
     pump(40);
     assert(press_count == before);
@@ -487,10 +503,11 @@ static void cursor_handshake(void)
     snapshot();
     check_mode(0);
     check_fallback_marker(output_bytes + fallback);
-    await_presses(before + 5);
+    await_presses(before + 7);
     assert(presses[before] == 0x1e && presses[before + 1] == 0x2e);
-    assert(presses[before + 2] == 0x2d);
-    assert(presses[before + 3] == 0x48 && presses[before + 4] == 0x15);
+    assert(presses[before + 2] == 0x1d && presses[before + 3] == 0x2e);
+    assert(presses[before + 4] == 0x2d);
+    assert(presses[before + 5] == 0x48 && presses[before + 6] == 0x15);
     assert(held[0x48]);
     send_bytes("\033[1;1:3A", 8);
     pump(10);
@@ -559,13 +576,19 @@ static void transitions(void)
     cooked_line();
     enter_fullscreen();
     hold_raw_key();
-    terminal_renderer_suspend();
+    tigt_terminal_release();
+    assert(terminal_renderer_poll_input() == TIGT_OK);
     check_restored();
     no_keys_held();
-    terminal_renderer_resume();
+    assert(tigt_terminal_restore() == TIGT_OK);
+    assert(terminal_renderer_poll_input() == TIGT_OK);
     check_mode(0);
     hold_raw_key();
-    snapshot(); /* Resume redraws the retained region before recovery begins. */
+    const unsigned queries = cursor_requests;
+    snapshot(); /* True release invalidates the old region's cursor provenance. */
+    assert(cursor_requests == queries + 1);
+    snapshot(); /* Commit the retained fullscreen image at the fresh CPR. */
+    check_mode(0);
     const size_t recovery_output = output_length;
     /* DOS resumes sequential output by scrolling, not by clearing the screen. */
     memcpy(vram, vram + 8, 8);
@@ -590,9 +613,198 @@ static void transitions(void)
     no_keys_held();
 }
 
+static volatile sig_atomic_t received_signal, received_count;
+
+static void record_signal(int signo)
+{
+    received_signal = signo;
+    received_count++;
+}
+
+static void host_controls(void)
+{
+    const int signals[] = { SIGINT, SIGQUIT,
+#ifdef SIGINFO
+                            SIGINFO,
+#endif
+    };
+    struct sigaction previous[sizeof(signals) / sizeof(*signals)];
+    struct sigaction action = { .sa_handler = record_signal };
+    sigemptyset(&action.sa_mask);
+    for (size_t i = 0; i < sizeof(signals) / sizeof(*signals); i++)
+        assert(sigaction(signals[i], &action, &previous[i]) == 0);
+    assert(tigt_terminal_install_signal_handlers() == TIGT_OK);
+    terminal_renderer_init();
+    enter_fullscreen();
+    press_count = 0;
+    received_count = 0;
+
+    /* Ctrl-V quotes the entire extended-protocol gesture, not only its press.
+       Repeat and release must not become host signals or leave Ctrl held. */
+    const char quoted_press[] = "\033[118;5:1u\033[118;5:3u\033[99;5:1u";
+    send_bytes(quoted_press, sizeof(quoted_press) - 1);
+    await_presses(2);
+    assert(held[0x1d] && held[0x2e] && received_count == 0);
+    const char repeat[] = "\033[99;5:2u";
+    send_bytes(repeat, sizeof(repeat) - 1);
+    pump(40); /* Guest keyboard hardware, not host repeats, owns typematic. */
+    assert(press_count == 2 && held[0x1d] && held[0x2e] && received_count == 0);
+    const char release[] = "\033[99;5:3u";
+    send_bytes(release, sizeof(release) - 1);
+    pump(40);
+    no_keys_held();
+    assert(received_count == 0);
+
+    const size_t doubled = press_count;
+    send_bytes("\026\026", 2);
+    await_presses(doubled + 2);
+    assert(presses[doubled] == 0x1d && presses[doubled + 1] == 0x2f);
+    no_keys_held();
+    const char quoted[] = { 0x16, 0x1c, 0x16, 0x1a, 0x16, 0x14 };
+    const size_t controls = press_count;
+    send_bytes(quoted, sizeof(quoted));
+    await_presses(controls + 6);
+    assert(presses[controls + 1] == 0x2b);
+    assert(presses[controls + 3] == 0x2c);
+    assert(presses[controls + 5] == 0x14);
+    assert(received_count == 0);
+    no_keys_held();
+
+    const char control_bytes[] = { 0x03, 0x1c,
+#ifdef SIGINFO
+                                    0x14,
+#endif
+    };
+    for (size_t i = 0; i < sizeof(signals) / sizeof(*signals); i++) {
+        const size_t before = press_count;
+        send_bytes(control_bytes + i, 1);
+        pump(40);
+        assert(received_count == (sig_atomic_t) i + 1);
+        assert(received_signal == signals[i]);
+        assert(press_count == before);
+        no_keys_held();
+#ifdef SIGINFO
+        if (signals[i] == SIGINFO) {
+            check_mode(0); /* Informational, never terminal teardown. */
+            continue;
+        }
+#endif
+        check_restored();
+        assert(tigt_terminal_restore() == TIGT_OK);
+        pump(10);
+        check_mode(0);
+    }
+    terminal_renderer_close();
+    check_restored();
+    tigt_terminal_uninstall_signal_handlers();
+    for (size_t i = 0; i < sizeof(signals) / sizeof(*signals); i++)
+        assert(sigaction(signals[i], &previous[i], NULL) == 0);
+}
+
+static void cooked_quote(void)
+{
+    terminal_renderer_init();
+    blank_frame();
+    crtc[1] = 8; crtc[6] = 4;
+    snapshot();
+    const size_t before = press_count;
+    /* Kernel VLNEXT removes the prefix. Re-filtering the returned Ctrl-C
+       would raise SIGINT instead of passing it to DOS. */
+    send_bytes("\026\003\n", 3);
+    await_presses(before + 3);
+    assert(presses[before] == 0x1d && presses[before + 1] == 0x2e);
+    assert(presses[before + 2] == 0x1c);
+    no_keys_held();
+    terminal_renderer_close();
+    check_restored();
+}
+
+static void set_foreground(pid_t group)
+{
+    sigset_t mask, previous;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGTTOU);
+    assert(sigprocmask(SIG_BLOCK, &mask, &previous) == 0);
+    assert(tcsetpgrp(slave, group) == 0);
+    assert(sigprocmask(SIG_SETMASK, &previous, NULL) == 0);
+}
+
+static char read_notification(int fd)
+{
+    char byte;
+    ssize_t count;
+    do {
+        count = read(fd, &byte, 1);
+    } while (count < 0 && errno == EINTR);
+    assert(count == 1);
+    return byte;
+}
+
+static void job_control(void)
+{
+    int ready[2], command[2];
+    assert(pipe(ready) == 0 && pipe(command) == 0);
+    const pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        close(ready[0]); close(command[1]);
+        assert(setpgid(0, 0) == 0);
+        assert(read_notification(command[0]) == 'f');
+        assert(signal(SIGTSTP, SIG_DFL) != SIG_ERR);
+        assert(tigt_terminal_install_signal_handlers() == TIGT_OK);
+        terminal_renderer_init();
+        enter_fullscreen();
+        hold_raw_key();
+        const size_t before = press_count;
+        send_bytes("\032", 1); /* Host Ctrl-Z from adaptive raw input. */
+        pump(40);
+        /* The supervisor continues us in the background first. */
+        no_keys_held();
+        check_restored();
+        assert(!tigt_terminal_is_foreground());
+        send_bytes("b\n", 2);
+        pump(40);
+        assert(press_count == before); /* No background input reads. */
+        assert(write(ready[1], "b", 1) == 1);
+        assert(read_notification(command[0]) == 'f');
+        await_presses(before + 2);
+        assert(presses[before] == 0x30 && presses[before + 1] == 0x1c);
+        check_mode(0);
+        no_keys_held();
+        terminal_renderer_close();
+        check_restored();
+        tigt_terminal_uninstall_signal_handlers();
+        _exit(0);
+    }
+    close(ready[1]); close(command[0]);
+    assert(setpgid(child, child) == 0);
+    set_foreground(child);
+    assert(write(command[1], "f", 1) == 1);
+    int status;
+    assert(waitpid(child, &status, WUNTRACED) == child);
+    assert(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTSTP);
+    check_restored();
+    set_foreground(getpgrp());
+    assert(kill(child, SIGCONT) == 0);
+    assert(read_notification(ready[0]) == 'b');
+    set_foreground(child);
+    assert(kill(child, SIGCONT) == 0);
+    assert(write(command[1], "f", 1) == 1);
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    set_foreground(getpgrp());
+    close(ready[0]); close(command[1]);
+    check_restored();
+    drain_output();
+}
+
 static void tty_eof(void)
 {
     terminal_renderer_init();
+    blank_frame();
+    crtc[1] = 8; crtc[6] = 4;
+    vram[0] = '>'; crtc[15] = 1;
+    snapshot();
     const char eof = original.c_cc[VEOF];
     send_bytes(&eof, 1);
     pump(40);
@@ -601,6 +813,11 @@ static void tty_eof(void)
     pump(40);
     assert(press_count == 0);
     no_keys_held();
+    const size_t before_output = output_length;
+    vram[2] = 'Z'; crtc[15] = 2;
+    snapshot(); /* Input EOF must not release a still-live glass output owner. */
+    assert(strchr(output_bytes + before_output, 'Z'));
+    check_restored();
     terminal_renderer_close();
     check_restored();
 }
@@ -745,6 +962,17 @@ static void process_exit(void)
 int main(int argc, char **argv)
 {
     assert(argc == 2);
+    /* Each case gets a real controlling terminal and foreground process group;
+       an unattached PTY cannot exercise TIGT's job-control checks. */
+    const pid_t child = fork();
+    assert(child >= 0);
+    if (child) {
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status));
+        return WEXITSTATUS(status);
+    }
+    assert(setsid() >= 0);
     setup();
     assert(setenv("TIGT_PRESENTATION", "adaptive-reversible", 1) == 0);
     if (!strcmp(argv[1], "disable-mda") || !strcmp(argv[1], "disable-cga") ||
@@ -756,12 +984,16 @@ int main(int argc, char **argv)
         cursor_handshake();
         cursor_timeout();
         transitions();
+        host_controls();
+        job_control();
     }
     else if (!strcmp(argv[1], "exit"))
         process_exit();
     else if (!strcmp(argv[1], "backpressure"))
         output_backpressure();
     else if (!strcmp(argv[1], "raw-close")) {
+        original.c_lflag &= ~(ECHO | ECHONL);
+        assert(tcsetattr(slave, TCSANOW, &original) == 0);
         terminal_renderer_init();
         enter_fullscreen();
         hold_raw_key();
@@ -788,9 +1020,11 @@ int main(int argc, char **argv)
             check_mode(1);
             prebaseline_line();
             cooked_line();
-            terminal_renderer_suspend();
+            tigt_terminal_release();
+            assert(terminal_renderer_poll_input() == TIGT_OK);
             check_restored();
-            terminal_renderer_resume();
+            assert(tigt_terminal_restore() == TIGT_OK);
+            assert(terminal_renderer_poll_input() == TIGT_OK);
             if (nonblocking)
                 assert(fcntl(STDIN_FILENO, F_GETFL) & O_NONBLOCK);
             check_mode(1);
@@ -799,6 +1033,7 @@ int main(int argc, char **argv)
             check_restored();
             no_keys_held();
             redirected_echo();
+            cooked_quote();
         }
     }
     teardown();

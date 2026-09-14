@@ -7,10 +7,10 @@
 #include <86box/86box.h>
 #include <86box/plat.h>
 #include <86box/video.h>
+#include <tigt_terminal.h>
 #include "terminal_renderer.h"
 
 static volatile sig_atomic_t terminal_running = 1;
-static volatile sig_atomic_t terminal_suspend_requested;
 
 static void
 terminal_set_default_logfile(int argc, char **argv)
@@ -33,19 +33,17 @@ terminal_set_default_logfile(int argc, char **argv)
 }
 
 static void
-terminal_signal_handler(int signal)
+terminal_exit_requested(int signal)
 {
-    if (signal == SIGTSTP)
-        terminal_suspend_requested = 1;
-    else
-        terminal_running = 0;
+    (void) signal;
+    terminal_running = 0;
 }
 
 static void
-terminal_install_signal_handlers(void)
+terminal_install_exit_handlers(void)
 {
     struct sigaction action = {
-        .sa_handler = terminal_signal_handler
+        .sa_handler = terminal_exit_requested
     };
 
     sigemptyset(&action.sa_mask);
@@ -53,23 +51,8 @@ terminal_install_signal_handlers(void)
     sigaction(SIGTERM, &action, NULL);
     sigaction(SIGHUP, &action, NULL);
     sigaction(SIGQUIT, &action, NULL);
-    sigaction(SIGTSTP, &action, NULL);
 }
 
-static void
-terminal_suspend(void)
-{
-    struct sigaction action = {
-        .sa_handler = SIG_DFL
-    };
-
-    terminal_renderer_suspend();
-    sigemptyset(&action.sa_mask);
-    sigaction(SIGTSTP, &action, NULL);
-    raise(SIGTSTP);
-    terminal_install_signal_handlers();
-    terminal_renderer_resume();
-}
 
 void
 startblit(void)
@@ -108,12 +91,21 @@ main(int argc, char **argv)
     const uint64_t max_debt_ns = 50000000ULL;
 
     terminal_set_default_logfile(argc, argv);
-    terminal_install_signal_handlers();
+    /* These are application exit decisions, not terminal cleanup handlers.
+       TIGT wraps them and owns release, job control, and crash handling. */
+    terminal_install_exit_handlers();
+    if (tigt_terminal_install_signal_handlers() != 0) {
+        fprintf(stderr, "Terminal: could not install lifecycle handlers.\n");
+        return 1;
+    }
 
-    if (!pc_init(argc, argv))
+    if (!pc_init(argc, argv)) {
+        tigt_terminal_uninstall_signal_handlers();
         return 0;
+    }
     if (!pc_init_roms()) {
         fprintf(stderr, "No ROMs found.\n");
+        tigt_terminal_uninstall_signal_handlers();
         return 6;
     }
 
@@ -124,6 +116,7 @@ main(int argc, char **argv)
     plat_pause(0);
     is_cpu_thread = 1;
     old_ns = plat_timer_read();
+    int terminal_error = 0;
 
     while (terminal_running && cpu_thread_run) {
         const uint64_t now_ns = plat_timer_read();
@@ -132,11 +125,9 @@ main(int argc, char **argv)
         if (debt_ns > max_debt_ns)
             debt_ns = max_debt_ns;
 
-        if (terminal_suspend_requested) {
-            terminal_suspend_requested = 0;
-            terminal_suspend();
-        }
-        terminal_renderer_poll_input();
+        terminal_error = terminal_renderer_poll_input();
+        if (terminal_error < 0 || !terminal_running)
+            break;
         if (debt_ns >= quantum_ns && !dopause) {
             pc_run();
             debt_ns -= quantum_ns;
@@ -147,5 +138,10 @@ main(int argc, char **argv)
 
     terminal_renderer_close();
     pc_close(NULL);
+    tigt_terminal_uninstall_signal_handlers();
+    if (terminal_error < 0) {
+        fprintf(stderr, "Terminal: lifecycle failed (%d).\n", terminal_error);
+        return 1;
+    }
     return 0;
 }

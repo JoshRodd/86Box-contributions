@@ -148,10 +148,15 @@ preserving unread cooked text; `adaptive-reversible` restores cooked input when
 presentation returns to glass. Input polling and DSR handling are synchronous
 and preserve shared-descriptor state. The tigt presenter itself remains
 output-only and never reads stdin or changes terminal input modes.
-Raw mode delivers Ctrl-C and Ctrl-Z to the guest; Ctrl-] exits the emulator.
-In cooked mode Ctrl-C exits and Ctrl-Z suspends through the normal host terminal
-signals. Suspend and exit restore the original terminal settings and release
-guest keys. Piped stdin is accepted without changing terminal modes; EOF stops
+TIGT owns terminal mode restoration and host signal handling. Ctrl-C interrupts,
+Ctrl-\\ quits, and Ctrl-Z suspends in both cooked and managed raw modes; Ctrl-T
+requests host status where SIGINFO is available. Prefix a control key with Ctrl-V
+to send it to the guest instead; Ctrl-V twice sends one guest Ctrl-V.
+Suspend and exit restore saved terminal settings and release guest keys.
+Foreground continuation restores the configured keyboard, mouse and display
+modes; background execution permits only non-adaptive glass output, with no
+terminal input or reporting. Bitmap output while backgrounded is an error,
+not a silent discard or fallback. Piped stdin is accepted without changing terminal modes; EOF stops
 input after queued bytes are delivered, without stopping the guest. Input is
 held while emulation is paused. Unset the variable for the existing interactive
 curses frontend. An unrepresentable glass-TTY update is confirmed for 100 ms

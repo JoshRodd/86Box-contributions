@@ -5,7 +5,9 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include "../../src/terminal/terminal_renderer.c"
 
@@ -79,11 +81,22 @@ static void check_marker(const char *p, uint32_t expected_fg, uint32_t expected_
 int main(int argc, char **argv)
 {
     assert(argc == 2);
+    const pid_t child = fork();
+    assert(child >= 0);
+    if (child) {
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status));
+        return WEXITSTATUS(status);
+    }
+    assert(setsid() >= 0);
     const int mono = !strcmp(argv[1], "mda");
     int master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
     assert(master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0);
     int slave = open(ptsname(master), O_RDWR | O_NOCTTY);
     assert(slave >= 0);
+    assert(ioctl(slave, TIOCSCTTY, 0) == 0);
+    assert(tcsetpgrp(slave, getpgrp()) == 0);
     struct winsize size = { .ws_col = 10, .ws_row = 6 };
     assert(ioctl(slave, TIOCSWINSZ, &size) == 0);
     const tigt_presenter_config config = {
@@ -125,6 +138,7 @@ int main(int argc, char **argv)
     tigt_presenter_destroy(terminal_presenter);
     terminal_presenter = NULL;
     for (unsigned i = 0; i < 2; i++) tigt_video_destroy(terminal_text_decoders[0][i]);
+    assert(signal(SIGHUP, SIG_IGN) != SIG_ERR);
     close(slave); close(master);
     puts("PASS adaptive terminal colors match hardware attributes/palette");
     return 0;
