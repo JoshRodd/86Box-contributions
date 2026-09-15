@@ -30,6 +30,10 @@
 #include <86box/vid_mcga.h>
 #include "cpu.h"
 #include "808x_marty_86box.h"
+#ifdef USE_TERMINAL_UI
+#    include "../terminal/terminal_renderer.h"
+#endif
+
 
 #define MCGA_VRAM_SIZE      0x10000
 #define MCGA_FONT_RAM_SIZE  0x02000
@@ -580,6 +584,10 @@ mcga_render_text(mcga_t *dev, int y)
                               (dev->blink & 0x08);
         if (cursor_on)
             bits = 0xff;
+#ifdef USE_TERMINAL_UI
+        terminal_video_text_cell(column, row, chr, dev->palette[fg], dev->palette[bg],
+                                 0, cursor_on);
+#endif
 
         /* Double-width. */
         if (mcga_is_double_width(dev, 0))
@@ -742,8 +750,12 @@ mcga_poll(void *priv)
         dev->linepos = 1;
 
         if (dev->enabled && (dev->displine < mcga_height(dev))) {
-            if (dev->displine == 0)
+            if (dev->displine == 0) {
                 video_wait_for_buffer();
+#ifdef USE_TERMINAL_UI
+                terminal_video_begin();
+#endif
+            }
             mcga_render_line(dev, dev->displine);
             video_lightpen_check_trigger_strobe(0, dev->displine, 0, 0, 1. / (VGACONST1 / (cpuclock * (double) (1ULL << 32))), monitor_index_global);
         }
@@ -767,8 +779,12 @@ mcga_poll(void *priv)
         } else
             dev->irq_latch = 0;
 
-        if (dev->enabled)
+        if (dev->enabled) {
+#ifdef USE_TERMINAL_UI
+            terminal_video_present_text();
+#endif
             mcga_present(dev);
+        }
         dev->blink++;
     }
 
