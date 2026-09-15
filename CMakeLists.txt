@@ -27,8 +27,29 @@ set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)
 
 set(CMAKE_CONFIGURATION_TYPES "Debug;Release;UltraDebug;Optimized" CACHE STRING "")
 
+# Select the frontend before vcpkg resolves manifest features at project().
+option(TERMINAL "Use the terminal-only console frontend" OFF)
+if(TERMINAL)
+    if(NOT DEFINED QT)
+        set(QT OFF CACHE BOOL "Use the Qt-based user interface")
+    elseif(QT)
+        message(FATAL_ERROR "QT and TERMINAL frontends are mutually exclusive; use -DQT=OFF")
+    endif()
+endif()
+
 if(NOT DEFINED QT OR QT)
     list(APPEND VCPKG_MANIFEST_FEATURES "qt-ui")
+endif()
+if(TERMINAL)
+    list(APPEND VCPKG_MANIFEST_FEATURES "terminal-ui")
+else()
+    list(APPEND VCPKG_MANIFEST_FEATURES "sdl-ui")
+endif()
+if(NOT DEFINED RTMIDI OR RTMIDI)
+    list(APPEND VCPKG_MANIFEST_FEATURES "rtmidi")
+endif()
+if(NOT DEFINED FLUIDSYNTH OR FLUIDSYNTH)
+    list(APPEND VCPKG_MANIFEST_FEATURES "fluidsynth")
 endif()
 
 if(NOT DEFINED OPENAL OR OPENAL)
@@ -44,6 +65,10 @@ project(86Box
     DESCRIPTION "Emulator of x86-based systems"
     HOMEPAGE_URL "https://86box.net"
     LANGUAGES C CXX)
+
+if(TERMINAL AND NOT UNIX)
+    message(FATAL_ERROR "The terminal frontend requires POSIX terminals")
+endif()
 
 if (NOT (CMAKE_SIZEOF_VOID_P STREQUAL "8"))
     message(FATAL_ERROR "Only 64-bit builds are supported.")
@@ -93,7 +118,11 @@ else()
 endif()
 
 if(APPLE)
-    option(CMAKE_MACOSX_BUNDLE "Build a macOS bundle (.app)" ON)
+    if(TERMINAL)
+        option(CMAKE_MACOSX_BUNDLE "Build a macOS bundle (.app)" OFF)
+    else()
+        option(CMAKE_MACOSX_BUNDLE "Build a macOS bundle (.app)" ON)
+    endif()
 endif()
 
 if(NOT NO_STATIC_OPTION)
