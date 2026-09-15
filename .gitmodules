@@ -1,0 +1,9 @@
+[submodule "submodules/IBM5140_REF"]
+	path = submodules/IBM5140_REF
+	url = git@github.com:JoshRodd/IBM5140_REF.git
+[submodule "submodules/IBM7690_REF"]
+	path = submodules/IBM7690_REF
+	url = git@github.com:JoshRodd/IBM7690_REF.git
+[submodule "submodules/PCJX_REF"]
+	path = submodules/PCJX_REF
+	url = git@github.com:JoshRodd/PCJX_REF.git
