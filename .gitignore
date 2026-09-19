@@ -72,3 +72,6 @@ CMakeLists.txt.user
 *.patch
 *.*.orig
 *.*.rej
+
+# Private work area - do not PR this to upstream
+/work
